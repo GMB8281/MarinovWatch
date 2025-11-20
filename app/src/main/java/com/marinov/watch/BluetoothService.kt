@@ -53,6 +53,12 @@ class BluetoothService : Service() {
     private lateinit var prefs: SharedPreferences
     private val PREF_NAME = "AppPrefs"
 
+    // Heartbeat
+    @Volatile
+    private var lastMessageTime: Long = 0L
+    private val HEARTBEAT_INTERVAL = 30000L  // 30 seconds
+    private val CONNECTION_TIMEOUT = 60000L // 60 seconds
+
     interface ServiceCallback {
         fun onStatusChanged(status: String)
         fun onDeviceConnected(deviceName: String)
@@ -72,10 +78,12 @@ class BluetoothService : Service() {
     // Protocolo
     private val TYPE_TEXT_CMD = 1
     private val TYPE_FILE_APK = 2
-    private val TYPE_NOTIFICATION = 3 // NOVO TIPO
+    private val TYPE_NOTIFICATION = 3
+    private val TYPE_HEARTBEAT = 4 // NOVO: Heartbeat
 
     private val CMD_REQUEST_APPS = "CMD_REQUEST_APPS"
     private val CMD_RESPONSE_APPS = "CMD_RESPONSE_APPS:"
+    private val CMD_PING = "PING" // NOVO: Heartbeat
 
     // Ação interna para comunicação entre ListenerService e BluetoothService
     companion object {
@@ -84,11 +92,11 @@ class BluetoothService : Service() {
 
         const val NOTIFICATION_ID = 1
         const val INSTALL_NOTIFICATION_ID = 2
-        const val MIRRORED_NOTIFICATION_ID_START = 1000 // IDs para notificações espelhadas
+        const val MIRRORED_NOTIFICATION_ID_START = 1000
 
         const val CHANNEL_ID = "bluetooth_service_channel"
         const val INSTALL_CHANNEL_ID = "install_channel"
-        const val MIRRORED_CHANNEL_ID = "mirrored_notifications" // NOVO CANAL
+        const val MIRRORED_CHANNEL_ID = "mirrored_notifications"
 
         const val ACTION_STOP_SERVICE = "ACTION_STOP_SERVICE"
     }
@@ -121,7 +129,6 @@ class BluetoothService : Service() {
         bluetoothAdapter = btManager.adapter
         createNotificationChannel()
 
-        // Registra receiver local
         val filter = IntentFilter(ACTION_SEND_NOTIF_TO_WATCH)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(notificationReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
@@ -135,6 +142,15 @@ class BluetoothService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+
+        // CORREÇÃO: Se o serviço for iniciado mas já está conectado, apenas atualiza
+        // a notificação para garantir que o texto está correto e encerra o fluxo aqui.
+        if (isConnected) {
+            Log.d("BluetoothService", "onStartCommand ignorado, pois já está conectado.")
+            updateStatus(currentStatus)
+            return START_STICKY // Usa START_STICKY mas não reinicia a lógica de conexão.
+        }
+
         startForeground(NOTIFICATION_ID, createNotification("Aguardando configuração..."))
         initializeLogicFromPrefs()
         return START_STICKY
@@ -162,6 +178,9 @@ class BluetoothService : Service() {
     // =================================================================
     @SuppressLint("MissingPermission")
     fun startSmartphoneLogic() {
+        // CORREÇÃO: Não reinicia se já estiver rodando
+        if (connectionJob?.isActive == true) return
+
         val lastMac = prefs.getString("last_mac", null)
         if (lastMac != null) {
             val device = bluetoothAdapter?.getRemoteDevice(lastMac)
@@ -256,6 +275,9 @@ class BluetoothService : Service() {
     // =================================================================
     @SuppressLint("MissingPermission")
     fun startWatchLogic() {
+        // CORREÇÃO: Não reinicia se já estiver rodando
+        if (serverJob?.isActive == true) return
+
         serverJob?.cancel()
         serverJob = serviceScope.launch {
             while (isActive) {
@@ -271,9 +293,9 @@ class BluetoothService : Service() {
                 var socket: BluetoothSocket? = null
                 while (socket == null && isActive) {
                     try {
-                        socket = serverSocket?.accept()
+                        socket = serverSocket?.accept(5000) // Timeout para não bloquear para sempre
                     } catch (e: IOException) {
-                        if (serverSocket == null) break
+                        // Timeout é esperado, apenas continue
                     }
                 }
 
@@ -293,54 +315,85 @@ class BluetoothService : Service() {
         this.bluetoothSocket = socket
         this.isConnected = true
         this.currentDeviceName = deviceName
+        this.lastMessageTime = System.currentTimeMillis()
 
         updateStatus("Conectado a $deviceName")
         withContext(Dispatchers.Main) {
             callback?.onDeviceConnected(deviceName)
         }
 
-        monitorInputLoop(socket)
-
-        this.isConnected = false
-        this.currentDeviceName = null
-        try { socket.close() } catch (e: Exception) {}
-        withContext(Dispatchers.Main) {
-            callback?.onDeviceDisconnected()
+        try {
+            coroutineScope { // Cria um escopo que falha junto (all-for-one)
+                launch { monitorInputLoop(socket) }
+                launch { heartbeatLoop() }
+            }
+        } catch (e: Exception) {
+            Log.w("BluetoothService", "Conexão encerrada: ${e.message}")
+        } finally {
+            this.isConnected = false
+            this.currentDeviceName = null
+            try { socket.close() } catch (e: Exception) {}
+            withContext(Dispatchers.Main) {
+                callback?.onDeviceDisconnected()
+            }
         }
     }
 
     private suspend fun monitorInputLoop(socket: BluetoothSocket) {
-        withContext(Dispatchers.IO) {
-            try {
-                val inputStream = DataInputStream(socket.inputStream)
-                while (isActive) {
-                    val packetType = inputStream.readByte().toInt()
-                    when (packetType) {
-                        TYPE_TEXT_CMD -> {
-                            val length = inputStream.readInt()
-                            val buffer = ByteArray(length)
-                            inputStream.readFully(buffer)
-                            val msg = String(buffer, Charsets.UTF_8)
-                            handleTextMessage(msg)
-                        }
-                        TYPE_FILE_APK -> {
-                            val length = inputStream.readLong()
-                            receiveApkFile(inputStream, length)
-                        }
-                        TYPE_NOTIFICATION -> {
-                            val length = inputStream.readInt()
-                            val buffer = ByteArray(length)
-                            inputStream.readFully(buffer)
-                            val jsonStr = String(buffer, Charsets.UTF_8)
-                            showMirroredNotification(jsonStr)
-                        }
-                        else -> throw IOException("Protocolo inválido")
-                    }
+        val inputStream = DataInputStream(socket.inputStream)
+        while (true) {
+            val packetType = inputStream.readByte().toInt()
+            lastMessageTime = System.currentTimeMillis() // Qualquer dado recebido reseta o timer
+
+            when (packetType) {
+                TYPE_TEXT_CMD -> {
+                    val length = inputStream.readInt()
+                    if (length < 0 || length > 1_000_000) throw IOException("Protocolo inválido: tamanho de texto suspeito")
+                    val buffer = ByteArray(length)
+                    inputStream.readFully(buffer)
+                    val msg = String(buffer, Charsets.UTF_8)
+                    handleTextMessage(msg)
                 }
-            } catch (e: Exception) {
-                Log.e("BluetoothService", "Conexão encerrada: ${e.message}")
+                TYPE_FILE_APK -> {
+                    val length = inputStream.readLong()
+                    if (length < 0 || length > 500_000_000) throw IOException("Protocolo inválido: tamanho de APK suspeito")
+                    receiveApkFile(inputStream, length)
+                }
+                TYPE_NOTIFICATION -> {
+                    val length = inputStream.readInt()
+                    if (length < 0 || length > 10_000) throw IOException("Protocolo inválido: tamanho de notificação suspeito")
+                    val buffer = ByteArray(length)
+                    inputStream.readFully(buffer)
+                    val jsonStr = String(buffer, Charsets.UTF_8)
+                    showMirroredNotification(jsonStr)
+                }
+                TYPE_HEARTBEAT -> {
+                    val length = inputStream.readInt()
+                    val buffer = ByteArray(length)
+                    inputStream.readFully(buffer) // Apenas consome o PING
+                }
+                else -> throw IOException("Protocolo inválido: tipo $packetType desconhecido")
             }
         }
+    }
+
+    private suspend fun heartbeatLoop() {
+        while (true) {
+            delay(HEARTBEAT_INTERVAL)
+            if (System.currentTimeMillis() - lastMessageTime > CONNECTION_TIMEOUT) {
+                throw IOException("Timeout de conexão (sem resposta por 15s)")
+            }
+            try {
+                sendTextMessage(CMD_PING, TYPE_HEARTBEAT)
+            } catch (e: Exception) {
+                throw IOException("Falha ao enviar heartbeat", e)
+            }
+        }
+    }
+    
+    private fun forceDisconnect() {
+        Log.w("BluetoothService", "Forçando desconexão devido a erro de escrita.")
+        try { bluetoothSocket?.close() } catch (e: Exception) {}
     }
 
     // --- Funcionalidades ---
@@ -348,11 +401,10 @@ class BluetoothService : Service() {
         sendTextMessage(CMD_REQUEST_APPS)
     }
 
-    // --- Envia Pacote de Notificação (Smartphone -> Watch) ---
     private fun sendNotificationPacket(jsonStr: String) {
         serviceScope.launch(Dispatchers.IO) {
             try {
-                if (bluetoothSocket == null) return@launch
+                if (bluetoothSocket == null || !isConnected) return@launch
                 val outputStream = DataOutputStream(bluetoothSocket!!.outputStream)
                 val bytes = jsonStr.toByteArray(Charsets.UTF_8)
 
@@ -364,11 +416,11 @@ class BluetoothService : Service() {
                 }
             } catch (e: Exception) {
                 Log.e("BluetoothService", "Erro ao enviar notificação", e)
+                forceDisconnect()
             }
         }
     }
 
-    // --- Exibe Notificação no Watch ---
     private fun showMirroredNotification(jsonStr: String) {
         try {
             val obj = JSONObject(jsonStr)
@@ -376,13 +428,12 @@ class BluetoothService : Service() {
             val text = obj.optString("text", "")
             val pkg = obj.optString("package", "")
 
-            // ID único para empilhar notificações (ou randômico para mostrar todas)
             val notifId = (System.currentTimeMillis() % 10000).toInt() + MIRRORED_NOTIFICATION_ID_START
 
             val notification = NotificationCompat.Builder(this, MIRRORED_CHANNEL_ID)
                 .setContentTitle(title)
                 .setContentText(text)
-                .setSubText(pkg) // Mostra o nome do pacote pequeno
+                .setSubText(pkg)
                 .setSmallIcon(android.R.drawable.ic_popup_reminder)
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setDefaults(NotificationCompat.DEFAULT_ALL)
@@ -398,7 +449,7 @@ class BluetoothService : Service() {
     }
 
     fun sendApkFile(uri: Uri) {
-        if (bluetoothSocket == null || !bluetoothSocket!!.isConnected) {
+        if (!isConnected) {
             CoroutineScope(Dispatchers.Main).launch {
                 callback?.onError("Não conectado.")
                 callback?.onUploadProgress(-1)
@@ -416,8 +467,7 @@ class BluetoothService : Service() {
                 cursor?.close()
 
                 inputStream = contentResolver.openInputStream(uri) ?: return@launch
-                val socketStream = bluetoothSocket!!.outputStream
-                val outputStream = DataOutputStream(socketStream)
+                val outputStream = DataOutputStream(bluetoothSocket!!.outputStream)
 
                 updateStatus("Enviando APK...")
                 withContext(Dispatchers.Main) { callback?.onUploadProgress(0) }
@@ -432,27 +482,24 @@ class BluetoothService : Service() {
                 var bytesRead: Int
                 var totalSent: Long = 0
 
-                while (inputStream.read(buffer).also { bytesRead = it } != -1) {
-                    try {
-                        // Sincronizado para não misturar com notificações saindo ao mesmo tempo
-                        synchronized(outputStream) {
-                            outputStream.write(buffer, 0, bytesRead)
-                        }
+                while (inputStream.read(buffer).also { bytesRead = it } != -1 && isActive) {
+                    synchronized(outputStream) {
+                        outputStream.write(buffer, 0, bytesRead)
                     }
-                    catch (e: IOException) { throw IOException("Conexão perdida") }
                     totalSent += bytesRead
-                    if (totalSent % (fileSize / 20 + 1) < 4096) {
+                    // Lógica para não sobrecarregar o Main thread com updates
+                    if (fileSize > 0 && totalSent % (fileSize / 20 + 1) < 4096) {
                         val progress = ((totalSent * 100) / fileSize).toInt()
                         withContext(Dispatchers.Main) { callback?.onUploadProgress(progress) }
                     }
                 }
                 synchronized(outputStream) { outputStream.flush() }
-                inputStream.close()
                 updateStatus("APK Enviado!")
                 withContext(Dispatchers.Main) { callback?.onUploadProgress(100) }
             } catch (e: Exception) {
                 updateStatus("Falha envio APK.")
                 withContext(Dispatchers.Main) { callback?.onUploadProgress(-1) }
+                forceDisconnect()
             } finally {
                 inputStream?.close()
             }
@@ -474,7 +521,7 @@ class BluetoothService : Service() {
                 val remaining = fileSize - totalRead
                 val toRead = if (remaining < buffer.size) remaining.toInt() else buffer.size
                 bytesRead = inputStream.read(buffer, 0, toRead)
-                if (bytesRead == -1) throw IOException("EOF inesperado")
+                if (bytesRead == -1) throw IOException("EOF inesperado durante recebimento de APK")
                 fos.write(buffer, 0, bytesRead)
                 totalRead += bytesRead
             }
@@ -487,6 +534,7 @@ class BluetoothService : Service() {
         } catch (e: Exception) {
             updateStatus("Erro recebimento APK.")
             if (file.exists()) file.delete()
+            throw e // Lança o erro para que o monitorInputLoop o capture e encerre a conexão
         }
     }
 
@@ -503,21 +551,24 @@ class BluetoothService : Service() {
         }
     }
 
-    private fun sendTextMessage(text: String) {
-        serviceScope.launch(Dispatchers.IO) {
+    private fun sendTextMessage(text: String, type: Int = TYPE_TEXT_CMD) {
+        serviceScope.launch {
+            if (!isConnected || bluetoothSocket == null) throw IOException("Não conectado")
+
             try {
-                if (bluetoothSocket == null) return@launch
                 val outputStream = DataOutputStream(bluetoothSocket!!.outputStream)
                 val bytes = text.toByteArray(Charsets.UTF_8)
 
                 synchronized(outputStream) {
-                    outputStream.writeByte(TYPE_TEXT_CMD)
+                    outputStream.writeByte(type)
                     outputStream.writeInt(bytes.size)
                     outputStream.write(bytes)
                     outputStream.flush()
                 }
             } catch (e: Exception) {
-                Log.e("BluetoothService", "Erro envio texto", e)
+                Log.e("BluetoothService", "Erro envio texto, tipo $type", e)
+                forceDisconnect()
+                throw e // Relança para o chamador saber que falhou
             }
         }
     }
@@ -613,7 +664,7 @@ class BluetoothService : Service() {
     fun stopConnectionLoopOnly() {
         connectionJob?.cancel()
         serverJob?.cancel()
-        try { bluetoothSocket?.close() } catch (e: Exception) {}
+        forceDisconnect()
         bluetoothSocket = null
         updateStatus("Parado pelo usuário.")
     }
@@ -653,7 +704,6 @@ class BluetoothService : Service() {
                 enableVibration(true)
             }
 
-            // NOVO CANAL PARA ESPELHAMENTO
             val mirrorChannel = NotificationChannel(
                 MIRRORED_CHANNEL_ID, "Notificações Espelhadas", NotificationManager.IMPORTANCE_HIGH
             ).apply {
