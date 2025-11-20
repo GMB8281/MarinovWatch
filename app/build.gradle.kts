@@ -6,13 +6,15 @@ plugins {
 android {
     namespace = "com.marinov.watch"
     compileSdk = 36
-
+    buildFeatures {
+        buildConfig = true
+    }
     defaultConfig {
         applicationId = "com.marinov.watch"
         minSdk = 24
         targetSdk = 36
         versionCode = 1
-        versionName = "0.1"
+        versionName = "0.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

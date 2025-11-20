@@ -1,12 +1,13 @@
 package com.marinov.watch
 
 import android.Manifest
+import android.bluetooth.BluetoothDevice
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.SharedPreferences
-import android.content.pm.PackageManager
+import android.content.res.ColorStateList
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -14,42 +15,42 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.provider.Settings
 import android.view.View
-import android.widget.Button
-import android.widget.LinearLayout
+import android.widget.ImageView
 import android.widget.ProgressBar
-import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
-import android.bluetooth.BluetoothDevice
-import org.json.JSONArray
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import android.util.TypedValue
+import android.widget.LinearLayout
 
 class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
 
-    // UI Elements
-    private lateinit var tvStatus: TextView
-    private lateinit var scrollSelection: ScrollView
-    private lateinit var layoutDashboard: LinearLayout
-    private lateinit var tvConnectedDevice: TextView
-    private lateinit var progressBarParams: ProgressBar
-    private lateinit var btnSmartphone: Button
-    private lateinit var btnWatch: Button
-    private lateinit var btnReset: Button
-    private lateinit var btnDisconnect: Button
+    // UI References
+    private lateinit var tvHeaderDeviceName: TextView
+    private lateinit var tvHeaderStatus: TextView
+    private lateinit var progressBarMain: ProgressBar
+    private lateinit var recyclerViewMenu: RecyclerView
 
-    // Gerenciamento App (Smartphone)
-    private lateinit var layoutAppManager: LinearLayout
-    private lateinit var btnListApps: Button
-    private lateinit var btnInstallApk: Button
-    private lateinit var btnNotifications: Button // NOVO BOTÃO
-    private lateinit var tvUploadProgress: TextView
+    // Watch Mode UI
+    private lateinit var layoutWatchMode: LinearLayout
+    private lateinit var imgWatchStatus: ImageView
+    private lateinit var tvWatchStatusBig: TextView
+    private lateinit var btnResetWatch: android.widget.Button
 
+    private lateinit var prefs: SharedPreferences
     private var bluetoothService: BluetoothService? = null
     private var isBound = false
-    private lateinit var prefs: SharedPreferences
+    private var isPhoneMode = true
+
+    // Cores dinâmicas (resolvidas em runtime)
+    private var colorError = 0
+    private var colorSuccess = 0
+    private var colorTextPrimary = 0
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(className: ComponentName, service: IBinder) {
@@ -57,7 +58,13 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
             bluetoothService = binder.getService()
             bluetoothService?.callback = this@MainActivity
             isBound = true
-            syncUIState()
+
+            // Inicia lógica baseada no tipo salvo
+            val type = prefs.getString("device_type", "PHONE")
+            if (type == "PHONE") bluetoothService?.startSmartphoneLogic()
+            else bluetoothService?.startWatchLogic()
+
+            updateStatusUI(bluetoothService?.currentStatus ?: "Iniciando...", bluetoothService?.isConnected == true)
         }
 
         override fun onServiceDisconnected(arg0: ComponentName) {
@@ -66,171 +73,134 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
         }
     }
 
-    private val requestPermissionLauncher =
-        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
-            checkBatteryOptimization()
-        }
-
     private val pickApkLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
-        if (uri != null) {
-            confirmApkUpload(uri)
-        }
+        uri?.let { confirmApkUpload(it) }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_main)
 
         prefs = getSharedPreferences("AppPrefs", Context.MODE_PRIVATE)
+
+        // 1. Verifica se é a primeira vez. Se sim, vai para Welcome.
+        if (!prefs.contains("device_type")) {
+            startActivity(Intent(this, WelcomeActivity::class.java))
+            finish()
+            return
+        }
+
+        setContentView(R.layout.activity_main)
+        resolveThemeColors()
         initViews()
-        setupButtons()
-        checkAndRequestPermissions()
+
+        isPhoneMode = prefs.getString("device_type", "PHONE") == "PHONE"
+        setupLayoutMode()
+
+        // 2. Otimização de Bateria (Direto, sem diálogo)
+        checkBatteryOptimizationDirect()
+
+        // 3. Inicia Serviço
+        bindToService()
     }
 
-    override fun onResume() {
-        super.onResume()
-        if (isBound && bluetoothService != null) {
-            bluetoothService?.callback = this
-        }
-    }
+    private fun resolveThemeColors() {
+        // Pega cores do tema para usar programaticamente
+        val typedValue = TypedValue()
+        theme.resolveAttribute(android.R.attr.colorError, typedValue, true)
+        colorError = typedValue.data
 
-    override fun onDestroy() {
-        super.onDestroy()
-        if (isBound) {
-            bluetoothService?.callback = null
-            unbindService(connection)
-            isBound = false
-        }
+        // Verde genérico para sucesso (pode ajustar para um atributo customizado se tiver)
+        colorSuccess = ContextCompat.getColor(this, android.R.color.holo_green_dark)
+
+        theme.resolveAttribute(android.R.attr.textColorPrimary, typedValue, true)
+        colorTextPrimary = typedValue.data
     }
 
     private fun initViews() {
-        tvStatus = findViewById(R.id.tvStatus)
-        scrollSelection = findViewById(R.id.scrollSelection)
-        layoutDashboard = findViewById(R.id.layoutDashboard)
-        tvConnectedDevice = findViewById(R.id.tvConnectedDevice)
-        progressBarParams = findViewById(R.id.progressBarParams)
-        btnSmartphone = findViewById(R.id.btnSmartphone)
-        btnWatch = findViewById(R.id.btnWatch)
-        btnReset = findViewById(R.id.btnReset)
-        btnDisconnect = findViewById(R.id.btnDisconnect)
+        tvHeaderDeviceName = findViewById(R.id.tvHeaderDeviceName)
+        tvHeaderStatus = findViewById(R.id.tvHeaderStatus)
+        progressBarMain = findViewById(R.id.progressBarMain)
+        recyclerViewMenu = findViewById(R.id.recyclerViewMenu)
 
-        layoutAppManager = findViewById(R.id.layoutAppManager)
-        btnListApps = findViewById(R.id.btnListApps)
-        btnInstallApk = findViewById(R.id.btnInstallApk)
-        btnNotifications = findViewById(R.id.btnNotifications) // Link com XML
-        tvUploadProgress = findViewById(R.id.tvUploadProgress)
+        layoutWatchMode = findViewById(R.id.layoutWatchMode)
+        imgWatchStatus = findViewById(R.id.imgWatchStatus)
+        tvWatchStatusBig = findViewById(R.id.tvWatchStatusBig)
+        btnResetWatch = findViewById(R.id.btnResetWatch)
+
+        btnResetWatch.setOnClickListener { resetApp() }
     }
 
-    private fun setupButtons() {
-        btnSmartphone.setOnClickListener {
-            savePreference("device_type", "PHONE")
-            startServiceLogic(isPhone = true)
+    private fun setupLayoutMode() {
+        if (isPhoneMode) {
+            layoutWatchMode.visibility = View.GONE
+            recyclerViewMenu.visibility = View.VISIBLE
+            setupPhoneMenu()
+        } else {
+            // Esconde a lista e o CoordinatorLayout collapse behavior se possível,
+            // ou apenas mostra o layout de overlay do watch
+            layoutWatchMode.visibility = View.VISIBLE
+            recyclerViewMenu.visibility = View.GONE
+            // No modo Watch, o header padrão do layout main ainda aparece,
+            // mas o layoutWatchMode cobre o conteúdo.
+            // Vamos deixar o header visível para debug, ou você pode esconder o AppBarLayout.
+            findViewById<View>(R.id.appBarLayout).visibility = View.GONE
         }
+    }
 
-        btnWatch.setOnClickListener {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                if (!packageManager.canRequestPackageInstalls()) {
-                    startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
-                    Toast.makeText(this, "Permita a instalação para receber APKs", Toast.LENGTH_LONG).show()
-                    return@setOnClickListener
+    private fun setupPhoneMenu() {
+        recyclerViewMenu.layoutManager = LinearLayoutManager(this)
+        val options = listOf(
+            MenuOption(
+                "Gerenciar Aplicativos",
+                "Ver lista de apps instalados no Watch",
+                android.R.drawable.ic_menu_sort_by_size,
+                { startActivity(Intent(this, AppListActivity::class.java)) }
+            ),
+            MenuOption(
+                "Notificações",
+                "Escolher quais apps enviam alertas",
+                android.R.drawable.ic_popup_reminder,
+                { startActivity(Intent(this, NotificationSettingsActivity::class.java)) }
+            ),
+            MenuOption(
+                "Instalar APK",
+                "Enviar arquivo .apk para o Watch",
+                android.R.drawable.ic_input_add,
+                { pickApkLauncher.launch("application/vnd.android.package-archive") }
+            ),
+            MenuOption(
+                "Desconectar",
+                "Parar serviço Bluetooth",
+                android.R.drawable.ic_lock_power_off,
+                {
+                    bluetoothService?.stopConnectionLoopOnly()
+                    updateStatusUI("Parado", false)
                 }
-            }
-            savePreference("device_type", "WATCH")
-            startServiceLogic(isPhone = false)
-        }
-
-        btnReset.setOnClickListener {
-            bluetoothService?.resetApp()
-            syncUIState()
-        }
-
-        btnDisconnect.setOnClickListener {
-            bluetoothService?.stopConnectionLoopOnly()
-            showSelectionScreen()
-        }
-
-        btnListApps.setOnClickListener {
-            val intent = Intent(this, AppListActivity::class.java)
-            startActivity(intent)
-        }
-
-        btnInstallApk.setOnClickListener {
-            pickApkLauncher.launch("application/vnd.android.package-archive")
-        }
-
-        // Listener do novo botão de notificações
-        btnNotifications.setOnClickListener {
-            val intent = Intent(this, NotificationSettingsActivity::class.java)
-            startActivity(intent)
-        }
+            ),
+            MenuOption(
+                "Resetar Tudo",
+                "Apagar configurações e voltar ao início",
+                android.R.drawable.ic_menu_delete,
+                { resetApp() }
+            )
+        )
+        recyclerViewMenu.adapter = MenuAdapter(options)
     }
 
-    private fun confirmApkUpload(uri: Uri) {
-        AlertDialog.Builder(this)
-            .setTitle("Enviar APK?")
-            .setMessage("Deseja enviar e instalar este arquivo no Watch conectado?")
-            .setPositiveButton("Enviar") { _, _ ->
-                bluetoothService?.sendApkFile(uri)
-            }
-            .setNegativeButton("Cancelar", null)
-            .show()
-    }
-
-    private fun checkAndRequestPermissions() {
-        val permissions = mutableListOf<String>()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            permissions.add(Manifest.permission.BLUETOOTH_SCAN)
-            permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
-        } else {
-            permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            permissions.add(Manifest.permission.POST_NOTIFICATIONS)
-        }
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-            permissions.add(Manifest.permission.READ_EXTERNAL_STORAGE)
-        } else {
-            permissions.add(Manifest.permission.READ_MEDIA_IMAGES)
-        }
-
-        val missing = permissions.filter {
-            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
-        }
-
-        if (missing.isNotEmpty()) {
-            requestPermissionLauncher.launch(permissions.toTypedArray())
-        } else {
-            checkBatteryOptimization()
-        }
-    }
-
-    private fun checkBatteryOptimization() {
+    private fun checkBatteryOptimizationDirect() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-            val packageName = packageName
-            if (!powerManager.isIgnoringBatteryOptimizations(packageName)) {
-                showBatteryOptimizationDialog()
-            } else {
-                bindToService()
-            }
-        } else {
-            bindToService()
-        }
-    }
-
-    private fun showBatteryOptimizationDialog() {
-        AlertDialog.Builder(this)
-            .setTitle("Permissão Necessária")
-            .setMessage("Para manter a conexão estável, permita ignorar otimizações.")
-            .setPositiveButton("Permitir") { _, _ ->
-                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                    data = Uri.parse("package:$packageName")
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                try {
+                    val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                        data = Uri.parse("package:$packageName")
+                    }
+                    startActivity(intent)
+                } catch (e: Exception) {
+                    Toast.makeText(this, "Não foi possível solicitar otimização de bateria.", Toast.LENGTH_SHORT).show()
                 }
-                startActivity(intent)
-                bindToService()
             }
-            .setNegativeButton("Agora não") { _, _ -> bindToService() }
-            .show()
+        }
     }
 
     private fun bindToService() {
@@ -239,123 +209,92 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
         bindService(intent, connection, Context.BIND_AUTO_CREATE)
     }
 
-    // =================================================================
-    // Lógica de UI
-    // =================================================================
-    private fun startServiceLogic(isPhone: Boolean) {
-        setLoading(true)
-        if (isPhone) {
-            bluetoothService?.startSmartphoneLogic()
-        } else {
-            bluetoothService?.startWatchLogic()
-        }
-    }
+    private fun updateStatusUI(status: String, isConnected: Boolean) {
+        val deviceName = bluetoothService?.currentDeviceName ?: "Dispositivo"
 
-    private fun syncUIState() {
-        val service = bluetoothService ?: return
-        tvStatus.text = "Status: ${service.currentStatus}"
+        // Atualiza Header (Phone Mode)
+        tvHeaderDeviceName.text = if (isConnected) deviceName else "Aguardando..."
+        tvHeaderStatus.text = if (isConnected) "Conectado" else status
+        tvHeaderStatus.setTextColor(if (isConnected) colorSuccess else colorError)
 
-        val type = prefs.getString("device_type", null)
-        if (type == null) {
-            showSelectionScreen()
-            return
-        }
+        progressBarMain.visibility = if (!isConnected && status.contains("Conectando")) View.VISIBLE else View.INVISIBLE
 
-        if (service.isConnected) {
-            showDashboard(service.currentDeviceName ?: "Dispositivo")
-        } else {
-            scrollSelection.visibility = View.GONE
-            layoutDashboard.visibility = View.VISIBLE
-            layoutAppManager.visibility = View.GONE
-            tvConnectedDevice.text = "Aguardando..."
-            tvConnectedDevice.setTextColor(getColor(android.R.color.darker_gray))
-        }
-        setLoading(false)
-    }
-
-    // =================================================================
-    // Callbacks
-    // =================================================================
-    override fun onStatusChanged(status: String) {
-        runOnUiThread { tvStatus.text = "Status: $status" }
-    }
-
-    override fun onDeviceConnected(deviceName: String) {
-        runOnUiThread { showDashboard(deviceName) }
-    }
-
-    override fun onDeviceDisconnected() {
-        runOnUiThread {
-            tvConnectedDevice.text = "Desconectado"
-            tvConnectedDevice.setTextColor(getColor(android.R.color.holo_red_dark))
-            layoutAppManager.visibility = View.GONE
-        }
-    }
-
-    override fun onError(message: String) {
-        runOnUiThread {
-            setLoading(false)
-            AlertDialog.Builder(this).setTitle("Aviso").setMessage(message).setPositiveButton("OK", null).show()
-        }
-    }
-
-    override fun onScanResult(devices: List<BluetoothDevice>) {
-        runOnUiThread {
-            val deviceNames = devices.map { "${it.name} (${it.address})" }.toTypedArray()
-            AlertDialog.Builder(this)
-                .setTitle("Escolha o Watch")
-                .setItems(deviceNames) { _, which -> bluetoothService?.connectToDevice(devices[which]) }
-                .setCancelable(false)
-                .show()
-        }
-    }
-
-    override fun onUploadProgress(progress: Int) {
-        runOnUiThread {
-            if (progress == -1) {
-                tvUploadProgress.text = "Erro no envio."
-                tvUploadProgress.setTextColor(getColor(android.R.color.holo_red_dark))
-            } else if (progress == 100) {
-                tvUploadProgress.text = "Envio Concluído!"
-                tvUploadProgress.setTextColor(getColor(android.R.color.holo_green_dark))
+        // Atualiza Watch Mode UI
+        if (!isPhoneMode) {
+            if (isConnected) {
+                tvWatchStatusBig.text = "Conectado"
+                tvWatchStatusBig.setTextColor(colorSuccess)
+                imgWatchStatus.setImageTintList(ColorStateList.valueOf(colorSuccess))
             } else {
-                tvUploadProgress.visibility = View.VISIBLE
-                tvUploadProgress.text = "Enviando APK: $progress%"
-                tvUploadProgress.setTextColor(getColor(android.R.color.black))
+                tvWatchStatusBig.text = "Desconectado"
+                tvWatchStatusBig.setTextColor(colorError)
+                imgWatchStatus.setImageTintList(ColorStateList.valueOf(colorError))
             }
         }
     }
 
-    override fun onAppListReceived(appsJson: String) {}
-
-    private fun showSelectionScreen() {
-        scrollSelection.visibility = View.VISIBLE
-        layoutDashboard.visibility = View.GONE
-        setLoading(false)
+    private fun resetApp() {
+        bluetoothService?.resetApp()
+        startActivity(Intent(this, WelcomeActivity::class.java))
+        finish()
     }
 
-    private fun showDashboard(deviceName: String) {
-        scrollSelection.visibility = View.GONE
-        layoutDashboard.visibility = View.VISIBLE
-        tvConnectedDevice.text = "Conectado a: $deviceName"
-        tvConnectedDevice.setTextColor(getColor(android.R.color.holo_green_dark))
-        setLoading(false)
+    private fun confirmApkUpload(uri: Uri) {
+        AlertDialog.Builder(this)
+            .setTitle("Enviar APK?")
+            .setMessage("Deseja instalar este app no Watch?")
+            .setPositiveButton("Enviar") { _, _ ->
+                bluetoothService?.sendApkFile(uri)
+                Toast.makeText(this, "Envio iniciado em segundo plano", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
 
-        val type = prefs.getString("device_type", "")
-        if (type == "PHONE") {
-            layoutAppManager.visibility = View.VISIBLE
-        } else {
-            layoutAppManager.visibility = View.GONE
+    // Callbacks do Serviço
+    override fun onStatusChanged(status: String) {
+        runOnUiThread { updateStatusUI(status, bluetoothService?.isConnected == true) }
+    }
+
+    override fun onDeviceConnected(deviceName: String) {
+        runOnUiThread { updateStatusUI("Conectado", true) }
+    }
+
+    override fun onDeviceDisconnected() {
+        runOnUiThread { updateStatusUI("Desconectado", false) }
+    }
+
+    override fun onError(message: String) {
+        runOnUiThread { Toast.makeText(this, message, Toast.LENGTH_LONG).show() }
+    }
+
+    override fun onScanResult(devices: List<BluetoothDevice>) {
+        runOnUiThread {
+            if (devices.isEmpty()) return@runOnUiThread
+            // Mostra diálogo para escolher dispositivo (apenas Phone Mode precisa disso)
+            if (isPhoneMode) {
+                val names = devices.map { "${it.name ?: "Sem nome"} (${it.address})" }.toTypedArray()
+                AlertDialog.Builder(this)
+                    .setTitle("Selecione o Watch")
+                    .setItems(names) { _, which -> bluetoothService?.connectToDevice(devices[which]) }
+                    .show()
+            }
         }
     }
 
-    private fun setLoading(isLoading: Boolean) {
-        progressBarParams.visibility = if (isLoading) View.VISIBLE else View.GONE
-        btnSmartphone.isEnabled = !isLoading
-        btnWatch.isEnabled = !isLoading
+    override fun onUploadProgress(progress: Int) {
+        // Opcional: Atualizar algum elemento da UI com progresso
+        // Como movemos para lista, podemos usar um Toast ou atualizar o subtítulo de um item da lista se quiséssemos ser fancy
     }
 
-    private fun savePreference(key: String, value: String) {
-        prefs.edit().putString(key, value).apply()
+    override fun onAppListReceived(appsJson: String) {}
+
+    override fun onDestroy() {
+        super.onDestroy()
+        if (isBound) {
+            bluetoothService?.callback = null
+            unbindService(connection)
+            isBound = false
+        }
     }
 }

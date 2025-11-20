@@ -6,7 +6,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.graphics.BitmapFactory
-import android.net.Uri
 import android.os.Bundle
 import android.os.IBinder
 import android.util.Base64
@@ -14,12 +13,10 @@ import android.view.LayoutInflater
 import android.view.MenuItem
 import android.view.View
 import android.view.ViewGroup
-import android.widget.Button
 import android.widget.ImageView
 import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.Toolbar
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -32,8 +29,6 @@ class AppListActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
     private lateinit var tvEmptyList: TextView
     private lateinit var recyclerView: RecyclerView
     private lateinit var adapter: AppAdapter
-    private lateinit var btnRefresh: Button
-    private lateinit var btnSendApk: Button
     private lateinit var toolbar: Toolbar
 
     private var bluetoothService: BluetoothService? = null
@@ -57,14 +52,6 @@ class AppListActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
         }
     }
 
-    private val pickApkLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
-        if (uri != null) {
-            Toast.makeText(this, "Iniciando envio... Veja o progresso na tela principal.", Toast.LENGTH_LONG).show()
-            bluetoothService?.sendApkFile(uri)
-            finish() // Volta pra main pra ver o progresso
-        }
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_app_list)
@@ -72,22 +59,16 @@ class AppListActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
         toolbar = findViewById(R.id.toolbar)
         setSupportActionBar(toolbar)
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
+        supportActionBar?.title = ""
 
         progressBar = findViewById(R.id.progressBarList)
         tvEmptyList = findViewById(R.id.tvEmptyList)
         recyclerView = findViewById(R.id.recyclerViewApps)
-        btnRefresh = findViewById(R.id.btnRefresh)
-        btnSendApk = findViewById(R.id.btnSendApk)
 
         // Configura RecyclerView
         recyclerView.layoutManager = LinearLayoutManager(this)
         adapter = AppAdapter()
         recyclerView.adapter = adapter
-
-        btnRefresh.setOnClickListener { fetchApps() }
-        btnSendApk.setOnClickListener {
-            pickApkLauncher.launch("application/vnd.android.package-archive")
-        }
 
         // Binda no serviço existente
         val intent = Intent(this, BluetoothService::class.java)
@@ -98,6 +79,7 @@ class AppListActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
         if (isBound && bluetoothService != null) {
             progressBar.visibility = View.VISIBLE
             tvEmptyList.text = "Solicitando lista ao Watch..."
+            tvEmptyList.visibility = View.VISIBLE
             recyclerView.visibility = View.GONE
             bluetoothService?.requestRemoteAppList()
         } else {
@@ -130,12 +112,10 @@ class AppListActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
                     apps.add(AppItem(name, pkg, iconBase64))
                 }
 
-                // ORDENAÇÃO ALFABÉTICA (Nome do App)
-                // Usamos lowercase() para garantir que "Zap" não venha antes de "abacate" por causa de maiúsculas
                 apps.sortBy { it.name.lowercase() }
 
                 if (apps.isEmpty()) {
-                    tvEmptyList.text = "Nenhum app de usuário encontrado."
+                    tvEmptyList.text = "Nenhum app de usuário encontrado no relógio."
                     tvEmptyList.visibility = View.VISIBLE
                     recyclerView.visibility = View.GONE
                 } else {
@@ -146,12 +126,12 @@ class AppListActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
 
             } catch (e: Exception) {
                 tvEmptyList.text = "Erro ao processar dados."
-                Toast.makeText(this, "Erro JSON: ${e.message}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Erro ao processar lista: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
 
-    // Implementações vazias
+    // Implementações vazias dos outros callbacks
     override fun onStatusChanged(status: String) {}
     override fun onDeviceConnected(deviceName: String) {}
     override fun onDeviceDisconnected() {

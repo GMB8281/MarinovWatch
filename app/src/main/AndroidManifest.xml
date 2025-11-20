@@ -2,16 +2,20 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- Permissões Bluetooth Legado -->
+    <!-- ============================================================ -->
+    <!-- PERMISSÕES -->
+    <!-- ============================================================ -->
+
+    <!-- Bluetooth (Legado - Android 11 e inferior) -->
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
 
-    <!-- Permissões Bluetooth Moderno (Android 12+) -->
+    <!-- Bluetooth (Moderno - Android 12+) -->
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" tools:targetApi="s" />
 
-    <!-- Permissões de Sistema -->
+    <!-- Serviços e Sistema -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -19,14 +23,20 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
-    <!-- Permissões Apps/Arquivos -->
+    <!-- Gerenciamento de Apps e Arquivos -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" tools:ignore="QueryAllPackagesPermission" />
+    <!-- CRÍTICO PARA ANDROID 8+ -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <!-- Leitura de Arquivos (APK) -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
 
+    <!-- ============================================================ -->
+    <!-- APLICAÇÃO -->
+    <!-- ============================================================ -->
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -37,6 +47,7 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Smartwatch">
 
+        <!-- Activity Principal -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -47,27 +58,33 @@
             </intent-filter>
         </activity>
 
-        <!-- Activities Secundárias (Sem Action Bar Padrão) -->
+        <activity
+            android:name=".WelcomeActivity"
+            android:exported="false"
+            android:theme="@style/Theme.Smartwatch" />
+
+        <!-- Lista de Apps (Watch) -->
         <activity
             android:name=".AppListActivity"
             android:exported="false"
             android:parentActivityName=".MainActivity"
-            android:theme="@style/Theme.Smartwatch.NoActionBar" />
+            android:theme="@style/Theme.Smartwatch" />
 
+        <!-- Configurações de Notificação -->
         <activity
             android:name=".NotificationSettingsActivity"
             android:exported="false"
             android:parentActivityName=".MainActivity"
-            android:theme="@style/Theme.Smartwatch.NoActionBar" />
+            android:theme="@style/Theme.Smartwatch" />
 
-        <!-- Serviços -->
+        <!-- Serviço Bluetooth -->
         <service
             android:name=".BluetoothService"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
 
-        <!-- Listener de Notificações (NOVO) -->
+        <!-- Listener de Notificações -->
         <service
             android:name=".MyNotificationListener"
             android:label="@string/app_name"
@@ -78,6 +95,7 @@
             </intent-filter>
         </service>
 
+        <!-- Boot Receiver -->
         <receiver
             android:name=".BootReceiver"
             android:enabled="true"
@@ -89,6 +107,7 @@
             </intent-filter>
         </receiver>
 
+        <!-- FileProvider (OBRIGATÓRIO PARA INSTALAÇÃO) -->
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

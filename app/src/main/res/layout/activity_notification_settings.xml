@@ -1,91 +1,177 @@
 <?xml version="1.0" encoding="utf-8"?>
-<androidx.constraintlayout.widget.ConstraintLayout
+<androidx.coordinatorlayout.widget.CoordinatorLayout
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#F5F5F5"
+    android:background="?android:attr/colorBackground"
     android:fitsSystemWindows="true">
 
     <com.google.android.material.appbar.AppBarLayout
         android:id="@+id/appBarLayout"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        app:layout_constraintTop_toTopOf="parent">
+        android:background="?android:attr/colorBackground"
+        app:liftOnScroll="true">
 
-        <androidx.appcompat.widget.Toolbar
-            android:id="@+id/toolbar"
+        <com.google.android.material.appbar.CollapsingToolbarLayout
             android:layout_width="match_parent"
-            android:layout_height="?attr/actionBarSize"
-            android:background="?attr/colorPrimary"
+            android:layout_height="120dp"
+            app:layout_scrollFlags="scroll|exitUntilCollapsed"
             app:title="Notificações"
-            app:titleTextColor="#FFFFFF"/>
+            app:collapsedTitleTextAppearance="@style/TextAppearance.AppCompat.Title"
+            app:expandedTitleTextAppearance="@style/TextAppearance.AppCompat.Display1"
+            app:expandedTitleMarginStart="24dp"
+            app:expandedTitleMarginBottom="16dp">
+
+            <androidx.appcompat.widget.Toolbar
+                android:id="@+id/toolbar"
+                android:layout_width="match_parent"
+                android:layout_height="?attr/actionBarSize"
+                app:layout_collapseMode="pin"
+                app:navigationIcon="@android:drawable/ic_menu_close_clear_cancel"/>
+        </com.google.android.material.appbar.CollapsingToolbarLayout>
     </com.google.android.material.appbar.AppBarLayout>
 
-    <com.google.android.material.card.MaterialCardView
+    <!-- Conteúdo Principal com Scroll -->
+    <androidx.core.widget.NestedScrollView
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_margin="16dp"
-        app:cardCornerRadius="8dp"
-        app:cardElevation="2dp"
-        app:cardBackgroundColor="#FFFFFF"
-        app:layout_constraintTop_toBottomOf="@id/appBarLayout"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent">
+        android:layout_height="match_parent"
+        app:layout_behavior="@string/appbar_scrolling_view_behavior">
 
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:padding="16dp">
+            android:paddingBottom="24dp">
 
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Espelhamento"
-                android:textSize="18sp"
-                android:textStyle="bold"
-                android:textColor="#000000"/>
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Envie as notificações deste telefone para o relógio conectado via Bluetooth."
-                android:textColor="#757575"
-                android:layout_marginTop="4dp"
-                android:layout_marginBottom="16dp"/>
-
-            <com.google.android.material.switchmaterial.SwitchMaterial
-                android:id="@+id/switchEnableMirroring"
+            <!-- Card 1: Configuração Global (Switch) -->
+            <com.google.android.material.card.MaterialCardView
+                android:id="@+id/cardHeader"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="Ativar Espelhamento"
-                android:textSize="16sp"/>
+                android:layout_marginHorizontal="16dp"
+                android:layout_marginTop="8dp"
+                android:layout_marginBottom="16dp"
+                app:cardCornerRadius="24dp"
+                app:cardElevation="0dp"
+                app:strokeWidth="1dp"
+                app:strokeColor="?android:attr/textColorSecondary"
+                app:cardBackgroundColor="?android:attr/colorBackground">
 
-            <View
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:padding="24dp">
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="Espelhamento"
+                            android:textSize="20sp"
+                            android:textStyle="bold"
+                            android:textColor="?android:attr/textColorPrimary"/>
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="Enviar notificações para o relógio"
+                            android:textSize="14sp"
+                            android:textColor="?android:attr/textColorSecondary"/>
+                    </LinearLayout>
+
+                    <com.google.android.material.switchmaterial.SwitchMaterial
+                        android:id="@+id/switchEnableMirroring"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"/>
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+
+            <!-- Card 2: Aviso de Permissão (Separado e Condicional) -->
+            <LinearLayout
+                android:id="@+id/layoutPermissionWarning"
                 android:layout_width="match_parent"
-                android:layout_height="1dp"
-                android:background="#EEEEEE"
-                android:layout_marginVertical="16dp"/>
-
-            <TextView
-                android:id="@+id/tvStatusPermission"
-                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Permissão: VERIFICANDO..."
-                android:textStyle="bold"
-                android:layout_marginBottom="8dp"/>
+                android:orientation="vertical"
+                android:layout_marginHorizontal="16dp"
+                android:layout_marginBottom="24dp"
+                android:background="@drawable/bg_warning_rounded"
+                android:padding="16dp"
+                android:visibility="gone">
 
-            <Button
-                android:id="@+id/btnOpenSettings"
+                <TextView
+                    android:id="@+id/tvStatusPermission"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Permissão de leitura necessária"
+                    android:textSize="16sp"
+                    android:textStyle="bold"
+                    android:textColor="?android:attr/colorError"/>
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="O app precisa ler as notificações do sistema para enviá-las ao relógio. Toque abaixo para resolver."
+                    android:textSize="14sp"
+                    android:textColor="?android:attr/textColorPrimary"
+                    android:layout_marginTop="8dp"/>
+
+                <Button
+                    android:id="@+id/btnOpenSettings"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Conceder Acesso"
+                    android:textColor="?android:attr/colorError"
+                    android:layout_marginTop="12dp"
+                    android:layout_gravity="end"
+                    style="@style/Widget.MaterialComponents.Button.TextButton"/>
+            </LinearLayout>
+
+            <!-- Card 3: Seção da Lista de Apps -->
+            <LinearLayout
+                android:id="@+id/layoutAppsSection"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="Gerenciar Permissão"
-                style="@style/Widget.MaterialComponents.Button.OutlinedButton"/>
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Aplicativos"
+                    android:textSize="18sp"
+                    android:textStyle="bold"
+                    android:textColor="?android:attr/textColorPrimary"
+                    android:layout_marginStart="24dp"
+                    android:layout_marginBottom="12dp"/>
+
+                <!-- Loading -->
+                <ProgressBar
+                    android:id="@+id/progressBarApps"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="center"
+                    android:indeterminateTint="?attr/colorPrimary"
+                    android:visibility="gone"/>
+
+                <!-- Lista de Apps -->
+                <androidx.recyclerview.widget.RecyclerView
+                    android:id="@+id/recyclerViewApps"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:nestedScrollingEnabled="false"/>
+            </LinearLayout>
 
         </LinearLayout>
+    </androidx.core.widget.NestedScrollView>
 
-    </com.google.android.material.card.MaterialCardView>
-
-</androidx.constraintlayout.widget.ConstraintLayout>
+</androidx.coordinatorlayout.widget.CoordinatorLayout>

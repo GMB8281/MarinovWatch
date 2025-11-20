@@ -26,6 +26,7 @@ import android.net.Uri
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
+import android.provider.Settings
 import android.util.Base64
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -35,6 +36,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.*
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 class BluetoothService : Service() {
 
@@ -46,6 +48,7 @@ class BluetoothService : Service() {
 
     private var bluetoothAdapter: BluetoothAdapter? = null
     private var bluetoothSocket: BluetoothSocket? = null
+    private var globalOutputStream: DataOutputStream? = null
 
     private val APP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
     private val APP_NAME = "MarinovWatchApp"
@@ -53,11 +56,22 @@ class BluetoothService : Service() {
     private lateinit var prefs: SharedPreferences
     private val PREF_NAME = "AppPrefs"
 
-    // Heartbeat
     @Volatile
     private var lastMessageTime: Long = 0L
-    private val HEARTBEAT_INTERVAL = 30000L  // 30 seconds
-    private val CONNECTION_TIMEOUT = 60000L // 60 seconds
+
+    @Volatile
+    private var isTransferring: Boolean = false
+
+    // Variáveis de Recepção de Arquivo
+    private var receiveFile: File? = null
+    private var receiveFileOutputStream: FileOutputStream? = null
+    private var receiveTotalSize: Long = 0
+    private var receiveBytesRead: Long = 0
+
+    private val HEARTBEAT_INTERVAL = 20000L
+    private val CONNECTION_TIMEOUT = 60000L
+
+    private val notificationMap = ConcurrentHashMap<String, Int>()
 
     interface ServiceCallback {
         fun onStatusChanged(status: String)
@@ -75,20 +89,29 @@ class BluetoothService : Service() {
     var currentDeviceName: String? = null
     var isConnected: Boolean = false
 
-    // Protocolo
+    // Protocolo V2 (Chunk Based)
     private val TYPE_TEXT_CMD = 1
-    private val TYPE_FILE_APK = 2
-    private val TYPE_NOTIFICATION = 3
-    private val TYPE_HEARTBEAT = 4 // NOVO: Heartbeat
+    private val TYPE_NOTIFICATION_POSTED = 3
+    private val TYPE_HEARTBEAT = 4
+    private val TYPE_NOTIFICATION_REMOVED = 5
+    private val TYPE_REQUEST_DISMISS = 6
+
+    private val TYPE_FILE_START = 7
+    private val TYPE_FILE_CHUNK = 8
+    private val TYPE_FILE_END = 9
 
     private val CMD_REQUEST_APPS = "CMD_REQUEST_APPS"
     private val CMD_RESPONSE_APPS = "CMD_RESPONSE_APPS:"
-    private val CMD_PING = "PING" // NOVO: Heartbeat
+    private val CMD_PING = "PING"
 
-    // Ação interna para comunicação entre ListenerService e BluetoothService
     companion object {
         const val ACTION_SEND_NOTIF_TO_WATCH = "com.marinov.watch.ACTION_SEND_NOTIF"
+        const val ACTION_SEND_REMOVE_TO_WATCH = "com.marinov.watch.ACTION_SEND_REMOVE"
+        const val ACTION_WATCH_DISMISSED_LOCAL = "com.marinov.watch.DISMISSED_LOCAL"
+        const val ACTION_CMD_DISMISS_ON_PHONE = "com.marinov.watch.CMD_DISMISS_PHONE"
+
         const val EXTRA_NOTIF_JSON = "extra_notif_json"
+        const val EXTRA_NOTIF_KEY = "extra_notif_key"
 
         const val NOTIFICATION_ID = 1
         const val INSTALL_NOTIFICATION_ID = 2
@@ -101,13 +124,29 @@ class BluetoothService : Service() {
         const val ACTION_STOP_SERVICE = "ACTION_STOP_SERVICE"
     }
 
-    // Receiver para pegar notificações do ListenerService e enviar via BT
-    private val notificationReceiver = object : BroadcastReceiver() {
+    private val internalReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == ACTION_SEND_NOTIF_TO_WATCH) {
-                val jsonString = intent.getStringExtra(EXTRA_NOTIF_JSON)
-                if (jsonString != null && isConnected) {
-                    sendNotificationPacket(jsonString)
+            if (!isConnected) return
+            when (intent?.action) {
+                ACTION_SEND_NOTIF_TO_WATCH -> {
+                    val jsonString = intent.getStringExtra(EXTRA_NOTIF_JSON)
+                    if (jsonString != null) sendPacket(TYPE_NOTIFICATION_POSTED, jsonString.toByteArray(Charsets.UTF_8))
+                }
+                ACTION_SEND_REMOVE_TO_WATCH -> {
+                    val key = intent.getStringExtra(EXTRA_NOTIF_KEY)
+                    if (key != null) sendPacket(TYPE_NOTIFICATION_REMOVED, key.toByteArray(Charsets.UTF_8))
+                }
+            }
+        }
+    }
+
+    private val watchDismissReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == ACTION_WATCH_DISMISSED_LOCAL) {
+                val key = intent.getStringExtra(EXTRA_NOTIF_KEY)
+                if (key != null && isConnected) {
+                    sendPacket(TYPE_REQUEST_DISMISS, key.toByteArray(Charsets.UTF_8))
+                    notificationMap.remove(key)
                 }
             }
         }
@@ -129,11 +168,18 @@ class BluetoothService : Service() {
         bluetoothAdapter = btManager.adapter
         createNotificationChannel()
 
-        val filter = IntentFilter(ACTION_SEND_NOTIF_TO_WATCH)
+        val filterInternal = IntentFilter().apply {
+            addAction(ACTION_SEND_NOTIF_TO_WATCH)
+            addAction(ACTION_SEND_REMOVE_TO_WATCH)
+        }
+        val filterWatch = IntentFilter(ACTION_WATCH_DISMISSED_LOCAL)
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(notificationReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            registerReceiver(internalReceiver, filterInternal, Context.RECEIVER_NOT_EXPORTED)
+            registerReceiver(watchDismissReceiver, filterWatch, Context.RECEIVER_NOT_EXPORTED)
         } else {
-            registerReceiver(notificationReceiver, filter)
+            registerReceiver(internalReceiver, filterInternal)
+            registerReceiver(watchDismissReceiver, filterWatch)
         }
     }
 
@@ -142,53 +188,29 @@ class BluetoothService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-
-        // CORREÇÃO: Se o serviço for iniciado mas já está conectado, apenas atualiza
-        // a notificação para garantir que o texto está correto e encerra o fluxo aqui.
         if (isConnected) {
-            Log.d("BluetoothService", "onStartCommand ignorado, pois já está conectado.")
             updateStatus(currentStatus)
-            return START_STICKY // Usa START_STICKY mas não reinicia a lógica de conexão.
+            return START_STICKY
         }
-
-        startForeground(NOTIFICATION_ID, createNotification("Aguardando configuração..."))
+        startForeground(NOTIFICATION_ID, createNotification("Aguardando conexão..."))
         initializeLogicFromPrefs()
         return START_STICKY
     }
 
     private fun initializeLogicFromPrefs() {
         val deviceType = prefs.getString("device_type", null)
-        if (deviceType == null) {
-            updateStatus("Aguardando configuração do usuário...")
-        } else {
-            if (bluetoothAdapter?.isEnabled != true) {
-                updateStatus("Bluetooth desligado.")
-                return
-            }
-            if (deviceType == "PHONE") {
-                startSmartphoneLogic()
-            } else {
-                startWatchLogic()
-            }
+        if (deviceType != null && bluetoothAdapter?.isEnabled == true) {
+            if (deviceType == "PHONE") startSmartphoneLogic() else startWatchLogic()
         }
     }
 
-    // =================================================================
-    // Lógica do CLIENTE (Smartphone)
-    // =================================================================
     @SuppressLint("MissingPermission")
     fun startSmartphoneLogic() {
-        // CORREÇÃO: Não reinicia se já estiver rodando
         if (connectionJob?.isActive == true) return
-
         val lastMac = prefs.getString("last_mac", null)
         if (lastMac != null) {
             val device = bluetoothAdapter?.getRemoteDevice(lastMac)
-            if (device != null) {
-                startAutoReconnectLoop(device)
-            } else {
-                startScanForDevices()
-            }
+            if (device != null) startAutoReconnectLoop(device) else startScanForDevices()
         } else {
             startScanForDevices()
         }
@@ -196,12 +218,11 @@ class BluetoothService : Service() {
 
     @SuppressLint("MissingPermission")
     fun startScanForDevices() {
-        updateStatus("Escaneando pareados...")
+        updateStatus("Escaneando...")
         connectionJob?.cancel()
         connectionJob = serviceScope.launch {
             val pairedDevices = bluetoothAdapter?.bondedDevices ?: emptySet()
             val successfulConnections = mutableListOf<Pair<BluetoothDevice, BluetoothSocket>>()
-
             supervisorScope {
                 val jobs = pairedDevices.map { device ->
                     async {
@@ -209,17 +230,14 @@ class BluetoothService : Service() {
                             val socket = device.createRfcommSocketToServiceRecord(APP_UUID)
                             socket.connect()
                             device to socket
-                        } catch (e: IOException) {
-                            null
-                        }
+                        } catch (e: IOException) { null }
                     }
                 }
                 jobs.awaitAll().filterNotNull().forEach { successfulConnections.add(it) }
             }
-
             withContext(Dispatchers.Main) {
                 if (successfulConnections.isEmpty()) {
-                    updateStatus("Nenhum Watch com App aberto.")
+                    updateStatus("Nenhum Watch encontrado.")
                     callback?.onError("Abra o app no Watch e tente novamente.")
                 } else if (successfulConnections.size == 1) {
                     val (device, socket) = successfulConnections[0]
@@ -244,7 +262,6 @@ class BluetoothService : Service() {
         connectionJob?.cancel()
         connectionJob = serviceScope.launch {
             var socketToUse = initialSocket
-
             while (isActive) {
                 try {
                     if (socketToUse == null) {
@@ -254,171 +271,382 @@ class BluetoothService : Service() {
                     }
                     handleConnectedSocket(socketToUse!!, device.name)
                     socketToUse = null
-                    if (isActive) {
-                        updateStatus("Conexão caiu. Reconectando em 3s...")
-                        delay(3000)
-                    }
+                    if (isActive) { updateStatus("Reconectando..."); delay(3000) }
                 } catch (e: IOException) {
-                    try { socketToUse?.close() } catch (e2: Exception) {}
                     socketToUse = null
-                    if (isActive) {
-                        updateStatus("Falha ao conectar. Tentando em 5s...")
-                        delay(5000)
-                    }
+                    if (isActive) { updateStatus("Tentando conectar..."); delay(5000) }
                 }
             }
         }
     }
 
-    // =================================================================
-    // Lógica do SERVIDOR (Watch)
-    // =================================================================
     @SuppressLint("MissingPermission")
     fun startWatchLogic() {
-        // CORREÇÃO: Não reinicia se já estiver rodando
         if (serverJob?.isActive == true) return
-
         serverJob?.cancel()
         serverJob = serviceScope.launch {
             while (isActive) {
-                updateStatus("Modo Watch: Aguardando...")
+                updateStatus("Aguardando conexão...")
                 var serverSocket: BluetoothServerSocket? = null
-                try {
-                    serverSocket = bluetoothAdapter?.listenUsingRfcommWithServiceRecord(APP_NAME, APP_UUID)
-                } catch (e: IOException) {
-                    delay(3000)
-                    continue
-                }
+                try { serverSocket = bluetoothAdapter?.listenUsingRfcommWithServiceRecord(APP_NAME, APP_UUID) }
+                catch (e: IOException) { delay(3000); continue }
 
                 var socket: BluetoothSocket? = null
                 while (socket == null && isActive) {
-                    try {
-                        socket = serverSocket?.accept(5000) // Timeout para não bloquear para sempre
-                    } catch (e: IOException) {
-                        // Timeout é esperado, apenas continue
-                    }
+                    try { socket = serverSocket?.accept(5000) } catch (e: IOException) {}
                 }
-
                 if (socket != null) {
                     try { serverSocket?.close() } catch (e: Exception) {}
-                    val remoteName = socket.remoteDevice?.name ?: "Smartphone"
-                    handleConnectedSocket(socket, remoteName)
+                    handleConnectedSocket(socket, socket.remoteDevice?.name ?: "Dispositivo")
                 }
             }
         }
     }
 
-    // =================================================================
-    // Gerenciamento de Conexão
-    // =================================================================
     private suspend fun handleConnectedSocket(socket: BluetoothSocket, deviceName: String) {
         this.bluetoothSocket = socket
+        this.globalOutputStream = DataOutputStream(socket.outputStream)
+
         this.isConnected = true
         this.currentDeviceName = deviceName
         this.lastMessageTime = System.currentTimeMillis()
 
-        updateStatus("Conectado a $deviceName")
-        withContext(Dispatchers.Main) {
-            callback?.onDeviceConnected(deviceName)
-        }
+        updateStatus("Conectado: $deviceName")
+        withContext(Dispatchers.Main) { callback?.onDeviceConnected(deviceName) }
 
         try {
-            coroutineScope { // Cria um escopo que falha junto (all-for-one)
+            coroutineScope {
                 launch { monitorInputLoop(socket) }
                 launch { heartbeatLoop() }
             }
         } catch (e: Exception) {
-            Log.w("BluetoothService", "Conexão encerrada: ${e.message}")
+            Log.w("BluetoothService", "Desconectado: ${e.message}")
         } finally {
-            this.isConnected = false
-            this.currentDeviceName = null
+            isConnected = false
+            currentDeviceName = null
+            isTransferring = false
+            globalOutputStream = null
+            try { receiveFileOutputStream?.close() } catch(e:Exception){}
+            receiveFileOutputStream = null
             try { socket.close() } catch (e: Exception) {}
-            withContext(Dispatchers.Main) {
-                callback?.onDeviceDisconnected()
-            }
+            withContext(Dispatchers.Main) { callback?.onDeviceDisconnected() }
         }
     }
 
     private suspend fun monitorInputLoop(socket: BluetoothSocket) {
         val inputStream = DataInputStream(socket.inputStream)
-        while (true) {
-            val packetType = inputStream.readByte().toInt()
-            lastMessageTime = System.currentTimeMillis() // Qualquer dado recebido reseta o timer
+        while (currentCoroutineContext().isActive) {
+            try {
+                val packetType = inputStream.readByte().toInt()
+                lastMessageTime = System.currentTimeMillis()
 
-            when (packetType) {
-                TYPE_TEXT_CMD -> {
-                    val length = inputStream.readInt()
-                    if (length < 0 || length > 1_000_000) throw IOException("Protocolo inválido: tamanho de texto suspeito")
-                    val buffer = ByteArray(length)
-                    inputStream.readFully(buffer)
-                    val msg = String(buffer, Charsets.UTF_8)
-                    handleTextMessage(msg)
+                when (packetType) {
+                    TYPE_TEXT_CMD -> handleTextMessage(readString(inputStream))
+                    TYPE_FILE_START -> {
+                        isTransferring = true
+                        val expectedSize = inputStream.readLong()
+                        handleFileStart(expectedSize)
+                    }
+                    TYPE_FILE_CHUNK -> {
+                        val len = inputStream.readInt()
+                        val buffer = ByteArray(len)
+                        inputStream.readFully(buffer)
+                        handleFileChunk(buffer)
+                    }
+                    TYPE_FILE_END -> {
+                        handleFileEnd()
+                        isTransferring = false
+                    }
+                    TYPE_NOTIFICATION_POSTED -> showMirroredNotification(readString(inputStream))
+                    TYPE_NOTIFICATION_REMOVED -> dismissLocalNotification(readString(inputStream))
+                    TYPE_REQUEST_DISMISS -> requestDismissOnPhone(readString(inputStream))
+                    TYPE_HEARTBEAT -> readString(inputStream)
+                    else -> throw IOException("Packet Inválido: $packetType")
                 }
-                TYPE_FILE_APK -> {
-                    val length = inputStream.readLong()
-                    if (length < 0 || length > 500_000_000) throw IOException("Protocolo inválido: tamanho de APK suspeito")
-                    receiveApkFile(inputStream, length)
-                }
-                TYPE_NOTIFICATION -> {
-                    val length = inputStream.readInt()
-                    if (length < 0 || length > 10_000) throw IOException("Protocolo inválido: tamanho de notificação suspeito")
-                    val buffer = ByteArray(length)
-                    inputStream.readFully(buffer)
-                    val jsonStr = String(buffer, Charsets.UTF_8)
-                    showMirroredNotification(jsonStr)
-                }
-                TYPE_HEARTBEAT -> {
-                    val length = inputStream.readInt()
-                    val buffer = ByteArray(length)
-                    inputStream.readFully(buffer) // Apenas consome o PING
-                }
-                else -> throw IOException("Protocolo inválido: tipo $packetType desconhecido")
+            } catch (e: EOFException) {
+                throw IOException("Conexão fechada pelo remoto")
             }
         }
+    }
+
+    private fun readString(inputStream: DataInputStream): String {
+        val length = inputStream.readInt()
+        if (length < 0 || length > 10_000_000) throw IOException("Tamanho string inválido: $length")
+        val buffer = ByteArray(length)
+        inputStream.readFully(buffer)
+        return String(buffer, Charsets.UTF_8)
     }
 
     private suspend fun heartbeatLoop() {
-        while (true) {
+        while (currentCoroutineContext().isActive) {
             delay(HEARTBEAT_INTERVAL)
+            if (isTransferring || !isConnected) continue
             if (System.currentTimeMillis() - lastMessageTime > CONNECTION_TIMEOUT) {
-                throw IOException("Timeout de conexão (sem resposta por 15s)")
+                forceDisconnect()
+                break
             }
-            try {
-                sendTextMessage(CMD_PING, TYPE_HEARTBEAT)
-            } catch (e: Exception) {
-                throw IOException("Falha ao enviar heartbeat", e)
-            }
+            try { sendPacket(TYPE_HEARTBEAT, CMD_PING.toByteArray()) }
+            catch (e: Exception) { break }
         }
     }
-    
+
     private fun forceDisconnect() {
-        Log.w("BluetoothService", "Forçando desconexão devido a erro de escrita.")
         try { bluetoothSocket?.close() } catch (e: Exception) {}
     }
 
-    // --- Funcionalidades ---
-    fun requestRemoteAppList() {
-        sendTextMessage(CMD_REQUEST_APPS)
-    }
-
-    private fun sendNotificationPacket(jsonStr: String) {
+    private fun sendPacket(type: Int, data: ByteArray) {
         serviceScope.launch(Dispatchers.IO) {
+            if (isTransferring || !isConnected) return@launch
+            val out = globalOutputStream ?: return@launch
             try {
-                if (bluetoothSocket == null || !isConnected) return@launch
-                val outputStream = DataOutputStream(bluetoothSocket!!.outputStream)
-                val bytes = jsonStr.toByteArray(Charsets.UTF_8)
-
-                synchronized(outputStream) {
-                    outputStream.writeByte(TYPE_NOTIFICATION)
-                    outputStream.writeInt(bytes.size)
-                    outputStream.write(bytes)
-                    outputStream.flush()
+                synchronized(out) {
+                    out.writeByte(type)
+                    out.writeInt(data.size)
+                    out.write(data)
+                    out.flush()
                 }
             } catch (e: Exception) {
-                Log.e("BluetoothService", "Erro ao enviar notificação", e)
                 forceDisconnect()
             }
         }
+    }
+
+    // ========================================================================
+    // LÓGICA DE RECEPÇÃO (BLINDADA)
+    // ========================================================================
+
+    private fun handleFileStart(expectedSize: Long) {
+        try {
+            val dir = getExternalFilesDir(null) ?: filesDir
+            receiveFile = File(dir, "temp_install.apk")
+            if (receiveFile?.exists() == true) {
+                receiveFile?.delete()
+            }
+            receiveFile?.createNewFile()
+
+            receiveFileOutputStream = FileOutputStream(receiveFile)
+            receiveTotalSize = expectedSize
+            receiveBytesRead = 0
+        } catch (e: Exception) {
+            receiveFileOutputStream = null
+        }
+    }
+
+    private fun handleFileChunk(data: ByteArray) {
+        if (receiveFileOutputStream != null) {
+            try {
+                receiveFileOutputStream!!.write(data)
+                receiveBytesRead += data.size
+                lastMessageTime = System.currentTimeMillis()
+            } catch (e: Exception) {
+                // Erro silencioso
+            }
+        }
+    }
+
+    private fun handleFileEnd() {
+        try {
+            receiveFileOutputStream?.flush()
+            receiveFileOutputStream?.close()
+            receiveFileOutputStream = null
+
+            if (receiveFile != null && receiveFile!!.exists()) {
+                CoroutineScope(Dispatchers.Main).launch {
+                    try {
+                        // Verifica permissão ANTES de tentar mostrar notificação de instalação
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            if (!packageManager.canRequestPackageInstalls()) {
+                                showPermissionNotification()
+                                return@launch
+                            }
+                        }
+                        showInstallNotification(receiveFile!!)
+                    } catch (e: Exception) {
+                        showErrorNotification("Erro: ${e.message}")
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // Erro
+        }
+    }
+
+    // ========================================================================
+    // LÓGICA DE ENVIO
+    // ========================================================================
+
+    fun sendApkFile(uri: Uri) {
+        serviceScope.launch(Dispatchers.IO) {
+            if (!isConnected) {
+                withContext(Dispatchers.Main) { callback?.onError("Não conectado.") }
+                return@launch
+            }
+
+            val out = globalOutputStream ?: return@launch
+            isTransferring = true
+
+            try {
+                val contentResolver = contentResolver
+                val fileSize = contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize } ?: -1L
+
+                contentResolver.openInputStream(uri)?.use { fileIS ->
+                    withContext(Dispatchers.Main) { callback?.onUploadProgress(0) }
+
+                    synchronized(out) {
+                        out.writeByte(TYPE_FILE_START)
+                        out.writeLong(fileSize)
+                        out.flush()
+                    }
+
+                    val buffer = ByteArray(8192)
+                    var totalSent = 0L
+                    var bytesRead: Int
+                    var lastUpdate = 0L
+
+                    while (fileIS.read(buffer).also { bytesRead = it } != -1) {
+                        synchronized(out) {
+                            out.writeByte(TYPE_FILE_CHUNK)
+                            out.writeInt(bytesRead)
+                            out.write(buffer, 0, bytesRead)
+                        }
+
+                        lastMessageTime = System.currentTimeMillis()
+                        totalSent += bytesRead
+
+                        val now = System.currentTimeMillis()
+                        if (now - lastUpdate > 300) {
+                            val progress = if (fileSize > 0) ((totalSent * 100) / fileSize).toInt() else 0
+                            withContext(Dispatchers.Main) { callback?.onUploadProgress(progress) }
+                            lastUpdate = now
+                        }
+                    }
+
+                    synchronized(out) {
+                        out.writeByte(TYPE_FILE_END)
+                        out.flush()
+                    }
+
+                    withContext(Dispatchers.Main) { callback?.onUploadProgress(100) }
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    callback?.onUploadProgress(-1)
+                    callback?.onError("Falha no envio: ${e.message}")
+                }
+            } finally {
+                isTransferring = false
+                lastMessageTime = System.currentTimeMillis()
+            }
+        }
+    }
+
+    private fun showInstallNotification(tempFile: File) {
+        val authority = "${packageName}.fileprovider"
+        val installUri = FileProvider.getUriForFile(this, authority, tempFile)
+
+        val installIntent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(installUri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+
+        val pendingIntent = PendingIntent.getActivity(
+            this, 0, installIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val builder = NotificationCompat.Builder(this, INSTALL_CHANNEL_ID)
+            .setContentTitle("APK Recebido")
+            .setContentText("Toque para instalar")
+            .setSmallIcon(android.R.drawable.stat_sys_download_done)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        manager.notify(INSTALL_NOTIFICATION_ID, builder.build())
+    }
+
+    // Notificação especial para pedir permissão no Watch
+    private fun showPermissionNotification() {
+        val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+            data = Uri.parse("package:$packageName")
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+        }
+
+        val pendingIntent = PendingIntent.getActivity(
+            this, 0, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val builder = NotificationCompat.Builder(this, INSTALL_CHANNEL_ID)
+            .setContentTitle("Configuração Necessária")
+            .setContentText("Toque para permitir instalação")
+            .setSmallIcon(android.R.drawable.ic_dialog_alert)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        manager.notify(INSTALL_NOTIFICATION_ID, builder.build())
+    }
+
+    private fun showErrorNotification(msg: String) {
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("Erro")
+            .setContentText(msg)
+            .setSmallIcon(android.R.drawable.stat_notify_error)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        manager.notify(999, builder.build())
+    }
+
+    // --- Demais Funções Auxiliares ---
+
+    private fun handleTextMessage(message: String) {
+        if (message == CMD_REQUEST_APPS) {
+            val appListJson = getInstalledAppsJsonWithIcons()
+            sendPacket(TYPE_TEXT_CMD, (CMD_RESPONSE_APPS + appListJson).toByteArray())
+        }
+        else if (message.startsWith(CMD_RESPONSE_APPS)) {
+            val jsonPart = message.substring(CMD_RESPONSE_APPS.length)
+            CoroutineScope(Dispatchers.Main).launch { callback?.onAppListReceived(jsonPart) }
+        }
+    }
+
+    @SuppressLint("QueryPermissionsNeeded")
+    private fun getInstalledAppsJsonWithIcons(): String {
+        val pm = packageManager
+        val packages = pm.getInstalledApplications(PackageManager.GET_META_DATA)
+        val appsList = JSONArray()
+        for (appInfo in packages) {
+            if ((appInfo.flags and ApplicationInfo.FLAG_SYSTEM) == 0 && pm.getLaunchIntentForPackage(appInfo.packageName) != null) {
+                try {
+                    val appJson = JSONObject()
+                    appJson.put("name", pm.getApplicationLabel(appInfo).toString())
+                    appJson.put("package", appInfo.packageName)
+                    appJson.put("icon", drawableToBase64(pm.getApplicationIcon(appInfo)))
+                    appsList.put(appJson)
+                } catch (e: Exception) {}
+            }
+        }
+        return appsList.toString()
+    }
+
+    private fun drawableToBase64(drawable: Drawable): String {
+        val bitmap: Bitmap = if (drawable is BitmapDrawable) drawable.bitmap else {
+            val bmp = Bitmap.createBitmap(drawable.intrinsicWidth.coerceAtLeast(1), drawable.intrinsicHeight.coerceAtLeast(1), Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(bmp)
+            drawable.setBounds(0, 0, canvas.width, canvas.height)
+            drawable.draw(canvas)
+            bmp
+        }
+        val resized = Bitmap.createScaledBitmap(bitmap, 48, 48, false)
+        val outputStream = ByteArrayOutputStream()
+        resized.compress(Bitmap.CompressFormat.PNG, 100, outputStream)
+        return Base64.encodeToString(outputStream.toByteArray(), Base64.NO_WRAP)
     }
 
     private fun showMirroredNotification(jsonStr: String) {
@@ -427,8 +655,12 @@ class BluetoothService : Service() {
             val title = obj.optString("title", "Notificação")
             val text = obj.optString("text", "")
             val pkg = obj.optString("package", "")
+            val key = obj.optString("key", "")
 
-            val notifId = (System.currentTimeMillis() % 10000).toInt() + MIRRORED_NOTIFICATION_ID_START
+            val notifId = notificationMap.getOrPut(key) { (System.currentTimeMillis() % 10000).toInt() + MIRRORED_NOTIFICATION_ID_START }
+
+            val deleteIntent = Intent(ACTION_WATCH_DISMISSED_LOCAL).apply { putExtra(EXTRA_NOTIF_KEY, key); setPackage(packageName) }
+            val deletePending = PendingIntent.getBroadcast(this, notifId, deleteIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
 
             val notification = NotificationCompat.Builder(this, MIRRORED_CHANNEL_ID)
                 .setContentTitle(title)
@@ -436,227 +668,31 @@ class BluetoothService : Service() {
                 .setSubText(pkg)
                 .setSmallIcon(android.R.drawable.ic_popup_reminder)
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
-                .setDefaults(NotificationCompat.DEFAULT_ALL)
                 .setAutoCancel(true)
+                .setDeleteIntent(deletePending)
                 .build()
 
-            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            manager.notify(notifId, notification)
+            (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(notifId, notification)
+        } catch (e: Exception) {}
+    }
 
-        } catch (e: Exception) {
-            Log.e("BluetoothService", "Erro ao exibir notificação espelhada", e)
+    private fun dismissLocalNotification(key: String) {
+        notificationMap[key]?.let { id ->
+            (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).cancel(id)
+            notificationMap.remove(key)
         }
     }
 
-    fun sendApkFile(uri: Uri) {
-        if (!isConnected) {
-            CoroutineScope(Dispatchers.Main).launch {
-                callback?.onError("Não conectado.")
-                callback?.onUploadProgress(-1)
-            }
-            return
-        }
-        serviceScope.launch(Dispatchers.IO) {
-            var inputStream: InputStream? = null
-            try {
-                val contentResolver = contentResolver
-                val cursor = contentResolver.query(uri, null, null, null, null)
-                val sizeIndex = cursor?.getColumnIndex(android.provider.OpenableColumns.SIZE)
-                cursor?.moveToFirst()
-                val fileSize = cursor?.getLong(sizeIndex ?: 0) ?: 0L
-                cursor?.close()
-
-                inputStream = contentResolver.openInputStream(uri) ?: return@launch
-                val outputStream = DataOutputStream(bluetoothSocket!!.outputStream)
-
-                updateStatus("Enviando APK...")
-                withContext(Dispatchers.Main) { callback?.onUploadProgress(0) }
-
-                synchronized(outputStream) {
-                    outputStream.writeByte(TYPE_FILE_APK)
-                    outputStream.writeLong(fileSize)
-                    outputStream.flush()
-                }
-
-                val buffer = ByteArray(4096)
-                var bytesRead: Int
-                var totalSent: Long = 0
-
-                while (inputStream.read(buffer).also { bytesRead = it } != -1 && isActive) {
-                    synchronized(outputStream) {
-                        outputStream.write(buffer, 0, bytesRead)
-                    }
-                    totalSent += bytesRead
-                    // Lógica para não sobrecarregar o Main thread com updates
-                    if (fileSize > 0 && totalSent % (fileSize / 20 + 1) < 4096) {
-                        val progress = ((totalSent * 100) / fileSize).toInt()
-                        withContext(Dispatchers.Main) { callback?.onUploadProgress(progress) }
-                    }
-                }
-                synchronized(outputStream) { outputStream.flush() }
-                updateStatus("APK Enviado!")
-                withContext(Dispatchers.Main) { callback?.onUploadProgress(100) }
-            } catch (e: Exception) {
-                updateStatus("Falha envio APK.")
-                withContext(Dispatchers.Main) { callback?.onUploadProgress(-1) }
-                forceDisconnect()
-            } finally {
-                inputStream?.close()
-            }
-        }
+    private fun requestDismissOnPhone(key: String) {
+        val intent = Intent(ACTION_CMD_DISMISS_ON_PHONE).apply { putExtra(EXTRA_NOTIF_KEY, key); setPackage(packageName) }
+        sendBroadcast(intent)
     }
 
-    private fun receiveApkFile(inputStream: DataInputStream, fileSize: Long) {
-        updateStatus("Recebendo APK...")
-        val cacheDir = externalCacheDir ?: cacheDir
-        val file = File(cacheDir, "temp_install.apk")
-        if (file.exists()) file.delete()
-
-        try {
-            val fos = FileOutputStream(file)
-            val buffer = ByteArray(4096)
-            var totalRead: Long = 0
-            var bytesRead: Int
-            while (totalRead < fileSize) {
-                val remaining = fileSize - totalRead
-                val toRead = if (remaining < buffer.size) remaining.toInt() else buffer.size
-                bytesRead = inputStream.read(buffer, 0, toRead)
-                if (bytesRead == -1) throw IOException("EOF inesperado durante recebimento de APK")
-                fos.write(buffer, 0, bytesRead)
-                totalRead += bytesRead
-            }
-            fos.flush()
-            fos.close()
-
-            updateStatus("APK Recebido. Verifique notificações.")
-            triggerInstallNotification(file)
-
-        } catch (e: Exception) {
-            updateStatus("Erro recebimento APK.")
-            if (file.exists()) file.delete()
-            throw e // Lança o erro para que o monitorInputLoop o capture e encerre a conexão
-        }
-    }
-
-    private fun handleTextMessage(message: String) {
-        if (message == CMD_REQUEST_APPS) {
-            val appListJson = getInstalledAppsJsonWithIcons()
-            sendTextMessage(CMD_RESPONSE_APPS + appListJson)
-        }
-        else if (message.startsWith(CMD_RESPONSE_APPS)) {
-            val jsonPart = message.substring(CMD_RESPONSE_APPS.length)
-            CoroutineScope(Dispatchers.Main).launch {
-                callback?.onAppListReceived(jsonPart)
-            }
-        }
-    }
-
-    private fun sendTextMessage(text: String, type: Int = TYPE_TEXT_CMD) {
-        serviceScope.launch {
-            if (!isConnected || bluetoothSocket == null) throw IOException("Não conectado")
-
-            try {
-                val outputStream = DataOutputStream(bluetoothSocket!!.outputStream)
-                val bytes = text.toByteArray(Charsets.UTF_8)
-
-                synchronized(outputStream) {
-                    outputStream.writeByte(type)
-                    outputStream.writeInt(bytes.size)
-                    outputStream.write(bytes)
-                    outputStream.flush()
-                }
-            } catch (e: Exception) {
-                Log.e("BluetoothService", "Erro envio texto, tipo $type", e)
-                forceDisconnect()
-                throw e // Relança para o chamador saber que falhou
-            }
-        }
-    }
-
-    @SuppressLint("QueryPermissionsNeeded")
-    private fun getInstalledAppsJsonWithIcons(): String {
-        val pm = packageManager
-        val packages = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            pm.getInstalledApplications(PackageManager.ApplicationInfoFlags.of(PackageManager.GET_META_DATA.toLong()))
-        } else {
-            pm.getInstalledApplications(PackageManager.GET_META_DATA)
-        }
-
-        val jsonArray = JSONArray()
-        for (appInfo in packages) {
-            if ((appInfo.flags and ApplicationInfo.FLAG_SYSTEM) == 0) {
-                val jsonObject = JSONObject()
-                jsonObject.put("name", pm.getApplicationLabel(appInfo).toString())
-                jsonObject.put("package", appInfo.packageName)
-
-                try {
-                    val iconDrawable = pm.getApplicationIcon(appInfo)
-                    val bitmap = drawableToBitmap(iconDrawable)
-                    val resized = Bitmap.createScaledBitmap(bitmap, 48, 48, false)
-                    val base64Icon = bitmapToBase64(resized)
-                    jsonObject.put("icon", base64Icon)
-                } catch (e: Exception) {
-                    jsonObject.put("icon", "")
-                }
-
-                jsonArray.put(jsonObject)
-            }
-        }
-        return jsonArray.toString()
-    }
-
-    private fun drawableToBitmap(drawable: Drawable): Bitmap {
-        if (drawable is BitmapDrawable) return drawable.bitmap
-        val bitmap = Bitmap.createBitmap(drawable.intrinsicWidth, drawable.intrinsicHeight, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bitmap)
-        drawable.setBounds(0, 0, canvas.width, canvas.height)
-        drawable.draw(canvas)
-        return bitmap
-    }
-
-    private fun bitmapToBase64(bitmap: Bitmap): String {
-        val outputStream = ByteArrayOutputStream()
-        bitmap.compress(Bitmap.CompressFormat.PNG, 100, outputStream)
-        return Base64.encodeToString(outputStream.toByteArray(), Base64.NO_WRAP)
-    }
-
-    private fun triggerInstallNotification(file: File) {
-        try {
-            val apkUri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", file)
-
-            val installIntent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(apkUri, "application/vnd.android.package-archive")
-                flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or
-                        Intent.FLAG_ACTIVITY_NEW_TASK or
-                        Intent.FLAG_ACTIVITY_CLEAR_TOP
-            }
-
-            val pendingIntent = PendingIntent.getActivity(
-                this, 0, installIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-
-            val notification = NotificationCompat.Builder(this, INSTALL_CHANNEL_ID)
-                .setContentTitle("APK Recebido")
-                .setContentText("Toque aqui para instalar o aplicativo.")
-                .setSmallIcon(android.R.drawable.stat_sys_download_done)
-                .setContentIntent(pendingIntent)
-                .setAutoCancel(true)
-                .setPriority(NotificationCompat.PRIORITY_HIGH)
-                .build()
-
-            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            manager.notify(INSTALL_NOTIFICATION_ID, notification)
-
-        } catch (e: Exception) {
-            updateStatus("Erro ao criar notificação de instalação.")
-        }
-    }
+    fun requestRemoteAppList() { sendPacket(TYPE_TEXT_CMD, CMD_REQUEST_APPS.toByteArray()) }
 
     fun resetApp() {
         stopConnectionLoopOnly()
         prefs.edit().clear().apply()
-        updateStatus("Resetado.")
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -666,25 +702,24 @@ class BluetoothService : Service() {
         serverJob?.cancel()
         forceDisconnect()
         bluetoothSocket = null
-        updateStatus("Parado pelo usuário.")
+        updateStatus("Parado.")
     }
 
     private fun updateStatus(text: String) {
         currentStatus = text
-        val notification = createNotification(text)
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        manager.notify(NOTIFICATION_ID, notification)
+        manager.notify(NOTIFICATION_ID, createNotification(text))
         CoroutineScope(Dispatchers.Main).launch { callback?.onStatusChanged(text) }
     }
 
     private fun createNotification(content: String): Notification {
         val intent = Intent(this, MainActivity::class.java)
-        val pendingIntent = android.app.PendingIntent.getActivity(this, 0, intent, android.app.PendingIntent.FLAG_IMMUTABLE)
+        val pending = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE)
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Marinov Watch Link")
             .setContentText(content)
             .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
-            .setContentIntent(pendingIntent)
+            .setContentIntent(pending)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .build()
@@ -693,27 +728,9 @@ class BluetoothService : Service() {
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val manager = getSystemService(NotificationManager::class.java)
-
-            val serviceChannel = NotificationChannel(
-                CHANNEL_ID, "Status Conexão", NotificationManager.IMPORTANCE_LOW
-            )
-            val installChannel = NotificationChannel(
-                INSTALL_CHANNEL_ID, "Instalação de Apps", NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = "Notificações para instalar aplicativos recebidos"
-                enableVibration(true)
-            }
-
-            val mirrorChannel = NotificationChannel(
-                MIRRORED_CHANNEL_ID, "Notificações Espelhadas", NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = "Mostra notificações recebidas do smartphone"
-                enableVibration(true)
-            }
-
-            manager.createNotificationChannel(serviceChannel)
-            manager.createNotificationChannel(installChannel)
-            manager.createNotificationChannel(mirrorChannel)
+            manager.createNotificationChannel(NotificationChannel(CHANNEL_ID, "Serviço", NotificationManager.IMPORTANCE_LOW))
+            manager.createNotificationChannel(NotificationChannel(INSTALL_CHANNEL_ID, "Instalação", NotificationManager.IMPORTANCE_HIGH))
+            manager.createNotificationChannel(NotificationChannel(MIRRORED_CHANNEL_ID, "Espelhamento", NotificationManager.IMPORTANCE_HIGH))
         }
     }
 
@@ -723,8 +740,9 @@ class BluetoothService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
-        unregisterReceiver(notificationReceiver)
+        try { unregisterReceiver(internalReceiver) } catch(e:Exception){}
+        try { unregisterReceiver(watchDismissReceiver) } catch(e:Exception){}
         serviceScope.cancel()
-        try { bluetoothSocket?.close() } catch (e: Exception) {}
+        forceDisconnect()
     }
 }
