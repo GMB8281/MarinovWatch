@@ -57,9 +57,6 @@ class BluetoothService : Service() {
     private val PREF_NAME = "AppPrefs"
 
     @Volatile
-    private var lastMessageTime: Long = 0L
-
-    @Volatile
     private var isTransferring: Boolean = false
 
     // Variáveis de Recepção de Arquivo
@@ -67,9 +64,6 @@ class BluetoothService : Service() {
     private var receiveFileOutputStream: FileOutputStream? = null
     private var receiveTotalSize: Long = 0
     private var receiveBytesRead: Long = 0
-
-    private val HEARTBEAT_INTERVAL = 20000L
-    private val CONNECTION_TIMEOUT = 60000L
 
     private val notificationMap = ConcurrentHashMap<String, Int>()
 
@@ -92,7 +86,6 @@ class BluetoothService : Service() {
     // Protocolo V2 (Chunk Based)
     private val TYPE_TEXT_CMD = 1
     private val TYPE_NOTIFICATION_POSTED = 3
-    private val TYPE_HEARTBEAT = 4
     private val TYPE_NOTIFICATION_REMOVED = 5
     private val TYPE_REQUEST_DISMISS = 6
 
@@ -102,7 +95,6 @@ class BluetoothService : Service() {
 
     private val CMD_REQUEST_APPS = "CMD_REQUEST_APPS"
     private val CMD_RESPONSE_APPS = "CMD_RESPONSE_APPS:"
-    private val CMD_PING = "PING"
 
     companion object {
         const val ACTION_SEND_NOTIF_TO_WATCH = "com.marinov.watch.ACTION_SEND_NOTIF"
@@ -151,6 +143,30 @@ class BluetoothService : Service() {
             }
         }
     }
+    
+    private val bluetoothStateReceiver = object : BroadcastReceiver() {
+        @SuppressLint("MissingPermission")
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val action = intent?.action
+            val device: BluetoothDevice? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                intent?.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                intent?.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+            }
+
+            if (device?.address != bluetoothSocket?.remoteDevice?.address) {
+                return
+            }
+
+            when (action) {
+                BluetoothDevice.ACTION_ACL_DISCONNECTED -> {
+                    Log.d("BluetoothService", "BroadcastReceiver: Device disconnected.")
+                    forceDisconnect()
+                }
+            }
+        }
+    }
 
     inner class LocalBinder : Binder() {
         fun getService(): BluetoothService = this@BluetoothService
@@ -173,13 +189,17 @@ class BluetoothService : Service() {
             addAction(ACTION_SEND_REMOVE_TO_WATCH)
         }
         val filterWatch = IntentFilter(ACTION_WATCH_DISMISSED_LOCAL)
+        val filterBluetooth = IntentFilter(BluetoothDevice.ACTION_ACL_DISCONNECTED)
+
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(internalReceiver, filterInternal, Context.RECEIVER_NOT_EXPORTED)
             registerReceiver(watchDismissReceiver, filterWatch, Context.RECEIVER_NOT_EXPORTED)
+            registerReceiver(bluetoothStateReceiver, filterBluetooth, Context.RECEIVER_NOT_EXPORTED)
         } else {
             registerReceiver(internalReceiver, filterInternal)
             registerReceiver(watchDismissReceiver, filterWatch)
+            registerReceiver(bluetoothStateReceiver, filterBluetooth)
         }
     }
 
@@ -309,7 +329,6 @@ class BluetoothService : Service() {
 
         this.isConnected = true
         this.currentDeviceName = deviceName
-        this.lastMessageTime = System.currentTimeMillis()
 
         updateStatus("Conectado: $deviceName")
         withContext(Dispatchers.Main) { callback?.onDeviceConnected(deviceName) }
@@ -317,7 +336,6 @@ class BluetoothService : Service() {
         try {
             coroutineScope {
                 launch { monitorInputLoop(socket) }
-                launch { heartbeatLoop() }
             }
         } catch (e: Exception) {
             Log.w("BluetoothService", "Desconectado: ${e.message}")
@@ -338,7 +356,6 @@ class BluetoothService : Service() {
         while (currentCoroutineContext().isActive) {
             try {
                 val packetType = inputStream.readByte().toInt()
-                lastMessageTime = System.currentTimeMillis()
 
                 when (packetType) {
                     TYPE_TEXT_CMD -> handleTextMessage(readString(inputStream))
@@ -360,7 +377,6 @@ class BluetoothService : Service() {
                     TYPE_NOTIFICATION_POSTED -> showMirroredNotification(readString(inputStream))
                     TYPE_NOTIFICATION_REMOVED -> dismissLocalNotification(readString(inputStream))
                     TYPE_REQUEST_DISMISS -> requestDismissOnPhone(readString(inputStream))
-                    TYPE_HEARTBEAT -> readString(inputStream)
                     else -> throw IOException("Packet Inválido: $packetType")
                 }
             } catch (e: EOFException) {
@@ -375,19 +391,6 @@ class BluetoothService : Service() {
         val buffer = ByteArray(length)
         inputStream.readFully(buffer)
         return String(buffer, Charsets.UTF_8)
-    }
-
-    private suspend fun heartbeatLoop() {
-        while (currentCoroutineContext().isActive) {
-            delay(HEARTBEAT_INTERVAL)
-            if (isTransferring || !isConnected) continue
-            if (System.currentTimeMillis() - lastMessageTime > CONNECTION_TIMEOUT) {
-                forceDisconnect()
-                break
-            }
-            try { sendPacket(TYPE_HEARTBEAT, CMD_PING.toByteArray()) }
-            catch (e: Exception) { break }
-        }
     }
 
     private fun forceDisconnect() {
@@ -437,7 +440,6 @@ class BluetoothService : Service() {
             try {
                 receiveFileOutputStream!!.write(data)
                 receiveBytesRead += data.size
-                lastMessageTime = System.currentTimeMillis()
             } catch (e: Exception) {
                 // Erro silencioso
             }
@@ -510,7 +512,6 @@ class BluetoothService : Service() {
                             out.write(buffer, 0, bytesRead)
                         }
 
-                        lastMessageTime = System.currentTimeMillis()
                         totalSent += bytesRead
 
                         val now = System.currentTimeMillis()
@@ -535,7 +536,6 @@ class BluetoothService : Service() {
                 }
             } finally {
                 isTransferring = false
-                lastMessageTime = System.currentTimeMillis()
             }
         }
     }
@@ -742,6 +742,7 @@ class BluetoothService : Service() {
         super.onDestroy()
         try { unregisterReceiver(internalReceiver) } catch(e:Exception){}
         try { unregisterReceiver(watchDismissReceiver) } catch(e:Exception){}
+        try { unregisterReceiver(bluetoothStateReceiver) } catch(e:Exception){}
         serviceScope.cancel()
         forceDisconnect()
     }

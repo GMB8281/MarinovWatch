@@ -270,10 +270,12 @@ class AppNotificationAdapter(private val prefs: SharedPreferences) : RecyclerVie
     inner class ViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
         private val imgIcon: ImageView = itemView.findViewById(R.id.imgAppIcon)
         private val tvName: TextView = itemView.findViewById(R.id.tvAppName)
+        private val tvAppPackage: TextView = itemView.findViewById(R.id.tvAppPackage)
         private val switchApp: SwitchMaterial = itemView.findViewById(R.id.switchAppNotification)
 
         fun bind(item: AppNotificationItem) {
             tvName.text = item.appName
+            tvAppPackage.text = item.packageName
             imgIcon.setImageDrawable(item.icon)
 
             switchApp.setOnCheckedChangeListener(null)
