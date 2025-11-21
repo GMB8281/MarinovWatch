@@ -1,10 +1,12 @@
 package com.marinov.watch
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.provider.Settings
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -34,6 +36,7 @@ class WelcomeActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_welcome)
 
+        checkBatteryOptimizationDirect()
         // Pede permissões básicas logo de cara para evitar fluxos complexos depois
         checkAndRequestPermissions()
 
@@ -42,31 +45,31 @@ class WelcomeActivity : AppCompatActivity() {
 
         cardSmartphone.setOnClickListener { finishSetup("PHONE") }
         cardWatch.setOnClickListener {
-            requestInstallPermission()
+            // 1. Inicia com a verificação de Root
+            checkRootAndSetup()
         }
     }
 
+    // 3. Chamado após a verificação de root.
     private fun requestInstallPermission() {
         if (!packageManager.canRequestPackageInstalls()) {
             val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
             intent.data = "package:$packageName".toUri()
             installPermissionLauncher.launch(intent)
         } else {
-            checkRootAndSetup()
+            // Se a permissão já existe ou a versão do Android é antiga, finaliza
+            finishSetup("WATCH")
         }
     }
 
+    // 2. Faz a verificação de Root e DEPOIS chama a permissão de instalação.
     private fun checkRootAndSetup() {
         lifecycleScope.launch(Dispatchers.IO) {
-            val hasRoot = checkRootAccess()
+            checkRootAccess() // Essa chamada dispara o prompt de root
 
             withContext(Dispatchers.Main) {
-                if (hasRoot) {
-                    // Root concedido, prossegue
-                    finishSetup("WATCH")
-                } else {
-                    finishSetup("WATCH")
-                }
+                // Após o prompt de root ser tratado (concedido ou negado), pedimos a outra permissão
+                requestInstallPermission()
             }
         }
     }
@@ -74,19 +77,16 @@ class WelcomeActivity : AppCompatActivity() {
     private suspend fun checkRootAccess(): Boolean {
         return withContext(Dispatchers.IO) {
             try {
-                // Tenta executar um comando simples com su
                 val process = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
-
-                // Aguarda até 3 segundos
                 val result = process.waitFor()
-
-                result == 0 // Retorna true se o comando foi executado com sucesso
+                result == 0
             } catch (_: Exception) {
                 false
             }
         }
     }
 
+    // 4. Apenas finaliza o processo
     private fun finishSetup(type: String) {
         val prefs = getSharedPreferences("AppPrefs", MODE_PRIVATE)
         prefs.edit { putString("device_type", type) }
@@ -113,6 +113,20 @@ class WelcomeActivity : AppCompatActivity() {
 
         if (missing.isNotEmpty()) {
             requestPermissionLauncher.launch(permissions.toTypedArray())
+        }
+    }
+
+    @SuppressLint("BatteryLife")
+    private fun checkBatteryOptimizationDirect() {
+        val pm = getSystemService(POWER_SERVICE) as PowerManager
+        if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+            try {
+                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                    data = "package:$packageName".toUri()
+                }
+                startActivity(intent)
+            } catch (_: Exception) {
+            }
         }
     }
 }
