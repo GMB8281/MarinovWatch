@@ -7,8 +7,10 @@
     android:gravity="center_vertical"
     android:paddingHorizontal="24dp"
     android:paddingVertical="16dp"
+    android:minHeight="72dp"
     android:background="?android:attr/selectableItemBackground">
 
+    <!-- Ícone (ID: imgIcon para coincidir com seu Adapter) -->
     <ImageView
         android:id="@+id/imgIcon"
         android:layout_width="24dp"
@@ -22,6 +24,7 @@
         android:orientation="vertical"
         android:layout_marginStart="24dp">
 
+        <!-- Título (ID: tvTitle para coincidir com seu Adapter) -->
         <TextView
             android:id="@+id/tvTitle"
             android:layout_width="wrap_content"
@@ -29,6 +32,7 @@
             android:textAppearance="@style/TextAppearance.Material3.TitleMedium"
             android:textColor="?android:attr/textColorPrimary"/>
 
+        <!-- Subtítulo (ID: tvSubtitle para coincidir com seu Adapter) -->
         <TextView
             android:id="@+id/tvSubtitle"
             android:layout_width="wrap_content"
@@ -38,6 +42,7 @@
             android:visibility="gone"/>
     </LinearLayout>
 
+    <!-- Extra Info (ID: tvExtraInfo para coincidir com seu Adapter) -->
     <TextView
         android:id="@+id/tvExtraInfo"
         android:layout_width="wrap_content"

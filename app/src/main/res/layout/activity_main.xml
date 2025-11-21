@@ -6,7 +6,7 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="?android:attr/colorBackground"
-    android:fitsSystemWindows="false"
+    android:fitsSystemWindows="true"
     tools:context=".MainActivity">
 
     <com.google.android.material.appbar.AppBarLayout
@@ -18,123 +18,133 @@
         app:liftOnScroll="true">
 
         <com.google.android.material.appbar.CollapsingToolbarLayout
+            android:id="@+id/collapsingToolbar"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            app:layout_scrollFlags="scroll|exitUntilCollapsed"
-            app:contentScrim="?attr/colorSurface"
-            android:paddingBottom="16dp">
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:paddingTop="?attr/actionBarSize"
-                android:paddingHorizontal="24dp">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="MarinovWatch"
-                    android:textStyle="bold"
-                    android:layout_marginBottom="24dp"
-                    android:textAppearance="@style/TextAppearance.Material3.HeadlineSmall"
-                    android:textColor="?android:attr/textColorSecondary"/>
-
-                <!-- HEADER PRINCIPAL: Ícone + Nome + Status -->
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="horizontal"
-                    android:gravity="center_vertical">
-
-                    <!-- Ícone Smartwatch Esquerda -->
-                    <com.google.android.material.card.MaterialCardView
-                        android:layout_width="64dp"
-                        android:layout_height="64dp"
-                        app:cardCornerRadius="32dp"
-                        app:cardBackgroundColor="?attr/colorSurfaceContainerHigh"
-                        app:strokeWidth="0dp"
-                        android:layout_marginEnd="16dp">
-                        <ImageView
-                            android:layout_width="32dp"
-                            android:layout_height="32dp"
-                            android:src="@drawable/ic_smartwatch"
-                            app:tint="?android:attr/textColorPrimary"
-                            android:layout_gravity="center"/>
-                    </com.google.android.material.card.MaterialCardView>
-
-                    <!-- Infos Direita -->
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:orientation="vertical">
-
-                        <TextView
-                            android:id="@+id/tvHeaderDeviceName"
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="Procurando..."
-                            android:textAppearance="@style/TextAppearance.Material3.HeadlineMedium"
-                            android:textStyle="bold"
-                            android:textColor="?android:attr/textColorPrimary"/>
-
-                        <TextView
-                            android:id="@+id/tvHeaderStatus"
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="Desconectado"
-                            android:textAppearance="@style/TextAppearance.Material3.BodyMedium"
-                            android:textColor="?android:attr/colorError"/>
-                    </LinearLayout>
-                </LinearLayout>
-
-                <ProgressBar
-                    android:id="@+id/progressBarMain"
-                    style="?android:attr/progressBarStyleHorizontal"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:indeterminate="true"
-                    android:layout_marginTop="16dp"
-                    android:visibility="invisible"/>
-
-            </LinearLayout>
+            android:layout_height="128dp"
+            app:layout_scrollFlags="scroll|exitUntilCollapsed|snap"
+            app:title="MarinovWatch"
+            app:collapsedTitleTextAppearance="@style/TextAppearance.Material3.TitleLarge"
+            app:expandedTitleTextAppearance="@style/TextAppearance.Material3.HeadlineMedium"
+            app:expandedTitleMarginStart="20dp"
+            app:expandedTitleMarginBottom="20dp"
+            android:paddingHorizontal="8dp"
+            app:contentScrim="?attr/colorSurface">
 
             <androidx.appcompat.widget.Toolbar
                 android:id="@+id/toolbar"
                 android:layout_width="match_parent"
                 android:layout_height="?attr/actionBarSize"
                 app:layout_collapseMode="pin"
-                android:visibility="gone"/>
+                app:contentInsetStart="0dp"
+                app:contentInsetStartWithNavigation="0dp" />
         </com.google.android.material.appbar.CollapsingToolbarLayout>
     </com.google.android.material.appbar.AppBarLayout>
 
-    <!-- MODO SMARTPHONE: Lista de Opções -->
-    <androidx.recyclerview.widget.RecyclerView
-        android:id="@+id/recyclerViewMenu"
+    <!-- Conteúdo Principal (Smartphone) -->
+    <!-- Adicionado ID: @+id/mainContentScrollView para controle de visibilidade -->
+    <androidx.core.widget.NestedScrollView
+        android:id="@+id/mainContentScrollView"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        app:layout_behavior="@string/appbar_scrolling_view_behavior"
-        android:clipToPadding="false"
-        android:paddingTop="8dp"
-        android:paddingBottom="24dp"
-        android:visibility="visible"/>
+        android:fillViewport="true"
+        app:layout_behavior="@string/appbar_scrolling_view_behavior">
 
-    <!-- MODO WATCH: Layout Simplificado Centralizado -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <!-- HEADER: Padding aplicado AQUI em vez da raiz -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:padding="16dp">
+
+                <!-- Ícone Smartwatch -->
+                <com.google.android.material.card.MaterialCardView
+                    android:layout_width="56dp"
+                    android:layout_height="56dp"
+                    app:cardCornerRadius="28dp"
+                    app:cardBackgroundColor="?attr/colorSurfaceContainerHigh"
+                    app:strokeWidth="0dp"
+                    android:layout_marginEnd="16dp">
+                    <ImageView
+                        android:layout_width="28dp"
+                        android:layout_height="28dp"
+                        android:src="@drawable/ic_smartwatch"
+                        app:tint="?android:attr/textColorPrimary"
+                        android:layout_gravity="center"/>
+                </com.google.android.material.card.MaterialCardView>
+
+                <!-- Infos -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:id="@+id/tvHeaderDeviceName"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Procurando..."
+                        android:textAppearance="@style/TextAppearance.Material3.TitleMedium"
+                        android:textStyle="bold"
+                        android:textColor="?android:attr/textColorPrimary"/>
+
+                    <TextView
+                        android:id="@+id/tvHeaderStatus"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Desconectado"
+                        android:textAppearance="@style/TextAppearance.Material3.BodyMedium"
+                        android:textColor="?android:attr/colorError"/>
+                </LinearLayout>
+            </LinearLayout>
+
+            <ProgressBar
+                android:id="@+id/progressBarMain"
+                style="?android:attr/progressBarStyleHorizontal"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:indeterminate="true"
+                android:layout_marginHorizontal="0dp"
+                android:layout_marginBottom="0dp"
+                android:visibility="invisible"
+                tools:visibility="visible"/>
+
+            <!-- MENU RECYCLER VIEW -->
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/recyclerViewMenu"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:nestedScrollingEnabled="false"
+                android:overScrollMode="never"/>
+
+        </LinearLayout>
+    </androidx.core.widget.NestedScrollView>
+
+    <!-- MODO WATCH: Overlay Completo -->
+    <!-- Sem padding na raiz, isso agora vai de ponta a ponta -->
     <LinearLayout
         android:id="@+id/layoutWatchMode"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:gravity="center"
         android:orientation="vertical"
+        android:background="?android:attr/colorBackground"
+        android:clickable="true"
+        android:focusable="true"
         android:visibility="gone"
-        android:paddingBottom="48dp"
-        tools:visibility="visible">
+        android:padding="24dp"
+        tools:visibility="gone">
 
         <ImageView
             android:id="@+id/imgWatchStatus"
-            android:layout_width="96dp"
-            android:layout_height="96dp"
-            android:layout_marginBottom="24dp"
+            android:layout_width="80dp"
+            android:layout_height="80dp"
+            android:layout_marginBottom="16dp"
             android:src="@drawable/ic_smartwatch"
             app:tint="?android:attr/colorError" />
 
@@ -144,7 +154,7 @@
             android:layout_height="wrap_content"
             android:text="Desconectado"
             android:textAlignment="center"
-            android:textAppearance="@style/TextAppearance.Material3.DisplaySmall"
+            android:textAppearance="@style/TextAppearance.Material3.HeadlineMedium"
             android:textColor="?android:attr/colorError" />
 
     </LinearLayout>

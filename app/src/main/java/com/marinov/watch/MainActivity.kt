@@ -21,9 +21,12 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.widget.Toolbar
 import androidx.core.content.ContextCompat
+import androidx.core.widget.NestedScrollView
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import com.google.android.material.appbar.AppBarLayout
 
 class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
 
@@ -32,6 +35,9 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
     private lateinit var tvHeaderStatus: TextView
     private lateinit var progressBarMain: ProgressBar
     private lateinit var recyclerViewMenu: RecyclerView
+    private lateinit var toolbar: Toolbar
+    private lateinit var appBarLayout: AppBarLayout
+    private lateinit var mainContentScrollView: NestedScrollView
 
     // Watch Mode UI
     private lateinit var layoutWatchMode: LinearLayout
@@ -52,7 +58,7 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
     private var uploadIconView: ImageView? = null
     private var uploadOkButton: Button? = null
 
-    // Cores dinâmicas (resolvidas em runtime)
+    // Cores dinâmicas
     private var colorError = 0
     private var colorSuccess = 0
     private var colorTextPrimary = 0
@@ -64,7 +70,6 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
             bluetoothService?.callback = this@MainActivity
             isBound = true
 
-            // Inicia lógica baseada no tipo salvo
             val type = prefs.getString("device_type", "PHONE")
             if (type == "PHONE") bluetoothService?.startSmartphoneLogic()
             else bluetoothService?.startWatchLogic()
@@ -87,7 +92,6 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
 
         prefs = getSharedPreferences("AppPrefs", MODE_PRIVATE)
 
-        // 1. Verifica se é a primeira vez. Se sim, vai para Welcome.
         if (!prefs.contains("device_type")) {
             startActivity(Intent(this, WelcomeActivity::class.java))
             finish()
@@ -98,27 +102,29 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
         resolveThemeColors()
         initViews()
 
+        setSupportActionBar(toolbar)
+        supportActionBar?.title = "MarinovWatch"
+
         isPhoneMode = prefs.getString("device_type", "PHONE") == "PHONE"
         setupLayoutMode()
 
-        // 3. Inicia Serviço
         bindToService()
     }
 
     private fun resolveThemeColors() {
-        // Pega cores do tema para usar programaticamente
         val typedValue = TypedValue()
         theme.resolveAttribute(android.R.attr.colorError, typedValue, true)
         colorError = typedValue.data
-
-        // Verde genérico para sucesso (pode ajustar para um atributo customizado se tiver)
         colorSuccess = ContextCompat.getColor(this, android.R.color.holo_green_dark)
-
         theme.resolveAttribute(android.R.attr.textColorPrimary, typedValue, true)
         colorTextPrimary = typedValue.data
     }
 
     private fun initViews() {
+        toolbar = findViewById(R.id.toolbar)
+        appBarLayout = findViewById(R.id.appBarLayout)
+        mainContentScrollView = findViewById(R.id.mainContentScrollView) // Referência nova
+
         tvHeaderDeviceName = findViewById(R.id.tvHeaderDeviceName)
         tvHeaderStatus = findViewById(R.id.tvHeaderStatus)
         progressBarMain = findViewById(R.id.progressBarMain)
@@ -131,23 +137,24 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
 
     private fun setupLayoutMode() {
         if (isPhoneMode) {
+            // MODO PHONE: Esconde overlay, mostra AppBar e Conteúdo
             layoutWatchMode.visibility = View.GONE
-            recyclerViewMenu.visibility = View.VISIBLE
+            appBarLayout.visibility = View.VISIBLE
+            mainContentScrollView.visibility = View.VISIBLE
             setupPhoneMenu()
         } else {
-            // Esconde a lista e o CoordinatorLayout collapse behavior se possível,
-            // ou apenas mostra o layout de overlay do watch
+            // MODO WATCH: Mostra overlay, ESCONDE TODO O RESTO
             layoutWatchMode.visibility = View.VISIBLE
-            recyclerViewMenu.visibility = View.GONE
-            // No modo Watch, o header padrão do layout main ainda aparece,
-            // mas o layoutWatchMode cobre o conteúdo.
-            // Vamos deixar o header visível para debug, ou você pode esconder o AppBarLayout.
-            findViewById<View>(R.id.appBarLayout).visibility = View.GONE
+            appBarLayout.visibility = View.GONE
+            mainContentScrollView.visibility = View.GONE
         }
     }
 
     private fun setupPhoneMenu() {
         recyclerViewMenu.layoutManager = LinearLayoutManager(this)
+        recyclerViewMenu.isNestedScrollingEnabled = false
+
+        // Usa a classe MenuOption do seu arquivo externo (mantido conforme seu upload)
         val options = listOf(
             MenuOption(
                 "Gerenciar Aplicativos",
@@ -189,9 +196,9 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
                 { resetApp() }
             )
         )
+        // Usa o seu Adapter externo (mantido conforme seu upload)
         recyclerViewMenu.adapter = MenuAdapter(options)
     }
-
 
     private fun bindToService() {
         val intent = Intent(this, BluetoothService::class.java)
@@ -201,15 +208,11 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
 
     private fun updateStatusUI(status: String, isConnected: Boolean) {
         val deviceName = bluetoothService?.currentDeviceName ?: "Dispositivo"
-
-        // Atualiza Header (Phone Mode)
         tvHeaderDeviceName.text = if (isConnected) deviceName else "Aguardando..."
         tvHeaderStatus.text = if (isConnected) "Conectado" else status
         tvHeaderStatus.setTextColor(if (isConnected) colorSuccess else colorError)
-
         progressBarMain.visibility = if (!isConnected && status.contains("Conectando")) View.VISIBLE else View.INVISIBLE
 
-        // Atualiza Watch Mode UI
         if (!isPhoneMode) {
             if (isConnected) {
                 tvWatchStatusBig.text = "Conectado"
@@ -246,7 +249,6 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
             Toast.makeText(this, "Watch não conectado", Toast.LENGTH_SHORT).show()
             return
         }
-
         AlertDialog.Builder(this)
             .setTitle("Desligar Smartwatch?")
             .setMessage("O smartwatch será completamente desligado. Esta ação requer acesso root no dispositivo.\n\nDeseja continuar?")
@@ -260,10 +262,7 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
     }
 
     private fun showUploadDialog() {
-        // Cria o layout customizado
         val dialogView = LayoutInflater.from(this).inflate(R.layout.dialog_upload_progress, null)
-
-        // Obtém as referências dos elementos
         uploadProgressBar = dialogView.findViewById(R.id.progressBarUpload)
         uploadPercentageText = dialogView.findViewById(R.id.tvUploadPercentage)
         uploadDescriptionText = dialogView.findViewById(R.id.tvUploadDescription)
@@ -271,48 +270,32 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
         uploadIconView = dialogView.findViewById(R.id.imgUploadIcon)
         uploadOkButton = dialogView.findViewById(R.id.btnUploadOk)
 
-        // Configura o botão OK (inicialmente invisível)
-        uploadOkButton?.setOnClickListener {
-            dismissUploadDialog()
-        }
-
-        // Cria e mostra o diálogo
-        uploadDialog = AlertDialog.Builder(this)
-            .setView(dialogView)
-            .setCancelable(false)
-            .create()
-
+        uploadOkButton?.setOnClickListener { dismissUploadDialog() }
+        uploadDialog = AlertDialog.Builder(this).setView(dialogView).setCancelable(false).create()
         uploadDialog?.show()
     }
 
     private fun updateUploadProgress(progress: Int) {
         when (progress) {
             in 0..99 -> {
-                // Transferência em andamento
                 uploadProgressBar?.progress = progress
                 uploadPercentageText?.text = "$progress%"
-                uploadDescriptionText?.text = "Transferindo arquivo para o Watch..."
+                uploadDescriptionText?.text = "Transferindo arquivo..."
             }
             100 -> {
-                // Sucesso!
                 uploadProgressBar?.progress = 100
                 uploadPercentageText?.text = "100%"
                 uploadTitleText?.text = "Envio concluído"
-                uploadDescriptionText?.text = "APK enviado com sucesso! Verifique o Watch."
-
-                // Muda o ícone para checkmark
+                uploadDescriptionText?.text = "APK enviado com sucesso!"
                 uploadIconView?.setImageResource(android.R.drawable.stat_sys_upload_done)
                 uploadIconView?.setColorFilter(colorSuccess)
                 uploadPercentageText?.setTextColor(colorSuccess)
-
-                // Mostra o botão OK
                 uploadProgressBar?.visibility = View.GONE
                 uploadOkButton?.visibility = View.VISIBLE
             }
             -1 -> {
-                // Erro - fecha o diálogo e mostra Toast
                 dismissUploadDialog()
-                Toast.makeText(this, "Falha no envio. Verifique a conexão e tente novamente.", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "Falha no envio.", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -320,47 +303,29 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
     private fun dismissUploadDialog() {
         uploadDialog?.dismiss()
         uploadDialog = null
-        uploadProgressBar = null
-        uploadPercentageText = null
-        uploadDescriptionText = null
-        uploadTitleText = null
-        uploadIconView = null
-        uploadOkButton = null
     }
 
-    // Callbacks do Serviço
     override fun onStatusChanged(status: String) {
         runOnUiThread { updateStatusUI(status, bluetoothService?.isConnected == true) }
     }
-
     override fun onDeviceConnected(deviceName: String) {
         runOnUiThread { updateStatusUI("Conectado", true) }
     }
-
     override fun onDeviceDisconnected() {
         runOnUiThread {
             updateStatusUI("Desconectado", false)
-            // Se o diálogo de upload estiver aberto e houver desconexão, fecha com erro
-            if (uploadDialog?.isShowing == true) {
-                updateUploadProgress(-1)
-            }
+            if (uploadDialog?.isShowing == true) updateUploadProgress(-1)
         }
     }
-
     override fun onError(message: String) {
         runOnUiThread {
             Toast.makeText(this, message, Toast.LENGTH_LONG).show()
-            // Se houver erro durante o upload, fecha com mensagem
-            if (uploadDialog?.isShowing == true) {
-                updateUploadProgress(-1)
-            }
+            if (uploadDialog?.isShowing == true) updateUploadProgress(-1)
         }
     }
-
     override fun onScanResult(devices: List<BluetoothDevice>) {
         runOnUiThread {
             if (devices.isEmpty()) return@runOnUiThread
-            // Mostra diálogo para escolher dispositivo (apenas Phone Mode precisa disso)
             if (isPhoneMode) {
                 val names = devices.map { "${it.name ?: "Sem nome"} (${it.address})" }.toTypedArray()
                 AlertDialog.Builder(this)
@@ -370,15 +335,9 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
             }
         }
     }
-
     override fun onUploadProgress(progress: Int) {
-        runOnUiThread {
-            if (uploadDialog?.isShowing == true) {
-                updateUploadProgress(progress)
-            }
-        }
+        runOnUiThread { if (uploadDialog?.isShowing == true) updateUploadProgress(progress) }
     }
-
     override fun onAppListReceived(appsJson: String) {}
 
     override fun onDestroy() {
