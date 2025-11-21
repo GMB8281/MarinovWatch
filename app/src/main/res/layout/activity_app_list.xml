@@ -23,8 +23,8 @@
             app:title="Aplicativos instalados"
             app:collapsedTitleTextAppearance="@style/TextAppearance.AppCompat.Title"
             app:expandedTitleTextAppearance="@style/TextAppearance.AppCompat.Display1"
-            app:expandedTitleMarginStart="24dp"
-            app:expandedTitleMarginBottom="16dp">
+            app:expandedTitleMarginStart="20dp"
+            app:expandedTitleMarginBottom="20dp">
 
             <androidx.appcompat.widget.Toolbar
                 android:id="@+id/toolbar"
@@ -37,6 +37,7 @@
     <FrameLayout
         android:layout_width="match_parent"
         android:layout_height="match_parent"
+        android:paddingBottom="24dp"
         app:layout_behavior="@string/appbar_scrolling_view_behavior">
 
         <!-- Container Centralizado para Loading e Mensagens -->
@@ -73,7 +74,7 @@
             android:layout_height="match_parent"
             android:clipToPadding="false"
             android:paddingTop="8dp"
-            android:paddingBottom="24dp"
+            android:paddingBottom="26dp"
             android:visibility="gone"
             tools:listitem="@layout/item_app"/>
     </FrameLayout>
