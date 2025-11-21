@@ -1,14 +1,12 @@
 package com.marinov.watch
 
 import android.Manifest
-import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
@@ -16,6 +14,7 @@ import com.google.android.material.card.MaterialCardView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import androidx.core.content.edit
 
 class WelcomeActivity : AppCompatActivity() {
 
@@ -50,8 +49,7 @@ class WelcomeActivity : AppCompatActivity() {
                     // Root concedido, prossegue
                     finishSetup("WATCH")
                 } else {
-                    // Sem root, mostra aviso mas permite continuar
-                    showRootWarningDialog()
+                    finishSetup("WATCH")
                 }
             }
         }
@@ -67,31 +65,15 @@ class WelcomeActivity : AppCompatActivity() {
                 val result = process.waitFor()
 
                 result == 0 // Retorna true se o comando foi executado com sucesso
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 false
             }
         }
     }
 
-    private fun showRootWarningDialog() {
-        AlertDialog.Builder(this)
-            .setTitle("Acesso Root Necessário")
-            .setMessage("Este dispositivo será configurado como Smartwatch.\n\n" +
-                    "Para utilizar a função de desligamento remoto, o dispositivo precisa ter acesso root.\n\n" +
-                    "Se você conceder acesso root ao app quando solicitado, poderá desligar o smartwatch remotamente do celular.\n\n" +
-                    "Deseja continuar?")
-            .setIcon(android.R.drawable.ic_dialog_info)
-            .setPositiveButton("Continuar") { _, _ ->
-                finishSetup("WATCH")
-            }
-            .setNegativeButton("Voltar", null)
-            .setCancelable(false)
-            .show()
-    }
-
     private fun finishSetup(type: String) {
-        val prefs = getSharedPreferences("AppPrefs", Context.MODE_PRIVATE)
-        prefs.edit().putString("device_type", type).apply()
+        val prefs = getSharedPreferences("AppPrefs", MODE_PRIVATE)
+        prefs.edit { putString("device_type", type) }
 
         // Se for Watch, mostra mensagem sobre root
         if (type == "WATCH") {

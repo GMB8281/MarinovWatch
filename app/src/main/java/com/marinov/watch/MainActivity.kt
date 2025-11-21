@@ -1,23 +1,20 @@
 package com.marinov.watch
 
-import android.Manifest
 import android.bluetooth.BluetoothDevice
 import android.content.ComponentName
-import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.SharedPreferences
 import android.content.res.ColorStateList
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
-import android.os.PowerManager
-import android.provider.Settings
+import android.util.TypedValue
 import android.view.LayoutInflater
 import android.view.View
 import android.widget.Button
 import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
@@ -27,8 +24,6 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
-import android.util.TypedValue
-import android.widget.LinearLayout
 
 class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
 
@@ -90,7 +85,7 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        prefs = getSharedPreferences("AppPrefs", Context.MODE_PRIVATE)
+        prefs = getSharedPreferences("AppPrefs", MODE_PRIVATE)
 
         // 1. Verifica se é a primeira vez. Se sim, vai para Welcome.
         if (!prefs.contains("device_type")) {
@@ -105,9 +100,6 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
 
         isPhoneMode = prefs.getString("device_type", "PHONE") == "PHONE"
         setupLayoutMode()
-
-        // 2. Otimização de Bateria (Direto, sem diálogo)
-        checkBatteryOptimizationDirect()
 
         // 3. Inicia Serviço
         bindToService()
@@ -200,26 +192,11 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
         recyclerViewMenu.adapter = MenuAdapter(options)
     }
 
-    private fun checkBatteryOptimizationDirect() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
-                try {
-                    val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                        data = Uri.parse("package:$packageName")
-                    }
-                    startActivity(intent)
-                } catch (e: Exception) {
-                    Toast.makeText(this, "Não foi possível solicitar otimização de bateria.", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
-    }
 
     private fun bindToService() {
         val intent = Intent(this, BluetoothService::class.java)
         ContextCompat.startForegroundService(this, intent)
-        bindService(intent, connection, Context.BIND_AUTO_CREATE)
+        bindService(intent, connection, BIND_AUTO_CREATE)
     }
 
     private fun updateStatusUI(status: String, isConnected: Boolean) {
@@ -309,15 +286,14 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
     }
 
     private fun updateUploadProgress(progress: Int) {
-        when {
-            progress in 0..99 -> {
+        when (progress) {
+            in 0..99 -> {
                 // Transferência em andamento
                 uploadProgressBar?.progress = progress
                 uploadPercentageText?.text = "$progress%"
                 uploadDescriptionText?.text = "Transferindo arquivo para o Watch..."
             }
-
-            progress == 100 -> {
+            100 -> {
                 // Sucesso!
                 uploadProgressBar?.progress = 100
                 uploadPercentageText?.text = "100%"
@@ -333,8 +309,7 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
                 uploadProgressBar?.visibility = View.GONE
                 uploadOkButton?.visibility = View.VISIBLE
             }
-
-            progress == -1 -> {
+            -1 -> {
                 // Erro - fecha o diálogo e mostra Toast
                 dismissUploadDialog()
                 Toast.makeText(this, "Falha no envio. Verifique a conexão e tente novamente.", Toast.LENGTH_LONG).show()
