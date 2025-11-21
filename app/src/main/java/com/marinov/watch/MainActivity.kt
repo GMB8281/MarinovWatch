@@ -394,7 +394,12 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
     override fun onDeviceDisconnected() {
         runOnUiThread {
             updateStatusUI("Desconectado", false)
-            if (uploadDialog?.isShowing == true) updateUploadProgress(-1)
+            if (uploadDialog?.isShowing == true) {
+                // Se o progresso já for 100%, não trate a desconexão como falha.
+                if (uploadProgressBar?.progress != 100) {
+                    updateUploadProgress(-1)
+                }
+            }
         }
     }
     override fun onError(message: String) {
