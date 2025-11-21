@@ -122,6 +122,17 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
         bindToService()
     }
 
+    override fun onResume() {
+        super.onResume()
+        // Quando a atividade volta ao foco, é crucial se registrar novamente como o callback
+        // e atualizar a UI com o estado mais recente do serviço.
+        if (isBound) {
+            bluetoothService?.callback = this
+            // Força a atualização da UI com os dados atuais do serviço
+            updateStatusUI(bluetoothService?.currentStatus ?: "Verificando...", bluetoothService?.isConnected == true)
+        }
+    }
+
     private fun hasMissingPermissions(): Boolean {
         return ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED
     }
