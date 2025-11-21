@@ -6,7 +6,7 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="?android:attr/colorBackground"
-    android:fitsSystemWindows="true"
+    android:fitsSystemWindows="false"
     tools:context=".MainActivity">
 
     <com.google.android.material.appbar.AppBarLayout
@@ -14,6 +14,7 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:background="?android:attr/colorBackground"
+        android:fitsSystemWindows="true"
         app:liftOnScroll="true">
 
         <com.google.android.material.appbar.CollapsingToolbarLayout
@@ -123,37 +124,29 @@
         android:id="@+id/layoutWatchMode"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:orientation="vertical"
         android:gravity="center"
+        android:orientation="vertical"
         android:visibility="gone"
-        android:background="?android:attr/colorBackground"
-        app:layout_behavior="@string/appbar_scrolling_view_behavior">
+        android:paddingBottom="48dp"
+        tools:visibility="visible">
 
         <ImageView
             android:id="@+id/imgWatchStatus"
             android:layout_width="96dp"
             android:layout_height="96dp"
+            android:layout_marginBottom="24dp"
             android:src="@drawable/ic_smartwatch"
-            app:tint="?android:attr/colorError"
-            android:layout_marginBottom="24dp"/>
+            app:tint="?android:attr/colorError" />
 
         <TextView
             android:id="@+id/tvWatchStatusBig"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="Desconectado"
+            android:textAlignment="center"
             android:textAppearance="@style/TextAppearance.Material3.DisplaySmall"
-            android:textColor="?android:attr/colorError"
-            android:textAlignment="center"/>
+            android:textColor="?android:attr/colorError" />
 
-        <Button
-            android:id="@+id/btnResetWatch"
-            style="@style/Widget.Material3.Button.TextButton"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Resetar Configuração"
-            android:textColor="?android:attr/textColorSecondary"
-            android:layout_marginTop="48dp"/>
     </LinearLayout>
 
 </androidx.coordinatorlayout.widget.CoordinatorLayout>

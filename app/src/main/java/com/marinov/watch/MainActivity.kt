@@ -14,7 +14,9 @@ import android.os.Bundle
 import android.os.IBinder
 import android.os.PowerManager
 import android.provider.Settings
+import android.view.LayoutInflater
 import android.view.View
+import android.widget.Button
 import android.widget.ImageView
 import android.widget.ProgressBar
 import android.widget.TextView
@@ -40,12 +42,20 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
     private lateinit var layoutWatchMode: LinearLayout
     private lateinit var imgWatchStatus: ImageView
     private lateinit var tvWatchStatusBig: TextView
-    private lateinit var btnResetWatch: android.widget.Button
 
     private lateinit var prefs: SharedPreferences
     private var bluetoothService: BluetoothService? = null
     private var isBound = false
     private var isPhoneMode = true
+
+    // Diálogo de Upload
+    private var uploadDialog: AlertDialog? = null
+    private var uploadProgressBar: ProgressBar? = null
+    private var uploadPercentageText: TextView? = null
+    private var uploadDescriptionText: TextView? = null
+    private var uploadTitleText: TextView? = null
+    private var uploadIconView: ImageView? = null
+    private var uploadOkButton: Button? = null
 
     // Cores dinâmicas (resolvidas em runtime)
     private var colorError = 0
@@ -125,9 +135,6 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
         layoutWatchMode = findViewById(R.id.layoutWatchMode)
         imgWatchStatus = findViewById(R.id.imgWatchStatus)
         tvWatchStatusBig = findViewById(R.id.tvWatchStatusBig)
-        btnResetWatch = findViewById(R.id.btnResetWatch)
-
-        btnResetWatch.setOnClickListener { resetApp() }
     }
 
     private fun setupLayoutMode() {
@@ -169,9 +176,15 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
                 { pickApkLauncher.launch("application/vnd.android.package-archive") }
             ),
             MenuOption(
+                "Desligar Smartwatch",
+                "Desligar completamente o smartwatch",
+                android.R.drawable.ic_lock_power_off,
+                { confirmShutdownWatch() }
+            ),
+            MenuOption(
                 "Desconectar",
                 "Parar serviço Bluetooth",
-                android.R.drawable.ic_lock_power_off,
+                android.R.drawable.ic_menu_close_clear_cancel,
                 {
                     bluetoothService?.stopConnectionLoopOnly()
                     updateStatusUI("Parado", false)
@@ -245,10 +258,99 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
             .setMessage("Deseja instalar este app no Watch?")
             .setPositiveButton("Enviar") { _, _ ->
                 bluetoothService?.sendApkFile(uri)
-                Toast.makeText(this, "Envio iniciado em segundo plano", Toast.LENGTH_SHORT).show()
+                showUploadDialog()
             }
             .setNegativeButton("Cancelar", null)
             .show()
+    }
+
+    private fun confirmShutdownWatch() {
+        if (!bluetoothService?.isConnected!!) {
+            Toast.makeText(this, "Watch não conectado", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("Desligar Smartwatch?")
+            .setMessage("O smartwatch será completamente desligado. Esta ação requer acesso root no dispositivo.\n\nDeseja continuar?")
+            .setIcon(android.R.drawable.ic_dialog_alert)
+            .setPositiveButton("Desligar") { _, _ ->
+                bluetoothService?.sendShutdownCommand()
+                Toast.makeText(this, "Comando enviado", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun showUploadDialog() {
+        // Cria o layout customizado
+        val dialogView = LayoutInflater.from(this).inflate(R.layout.dialog_upload_progress, null)
+
+        // Obtém as referências dos elementos
+        uploadProgressBar = dialogView.findViewById(R.id.progressBarUpload)
+        uploadPercentageText = dialogView.findViewById(R.id.tvUploadPercentage)
+        uploadDescriptionText = dialogView.findViewById(R.id.tvUploadDescription)
+        uploadTitleText = dialogView.findViewById(R.id.tvUploadTitle)
+        uploadIconView = dialogView.findViewById(R.id.imgUploadIcon)
+        uploadOkButton = dialogView.findViewById(R.id.btnUploadOk)
+
+        // Configura o botão OK (inicialmente invisível)
+        uploadOkButton?.setOnClickListener {
+            dismissUploadDialog()
+        }
+
+        // Cria e mostra o diálogo
+        uploadDialog = AlertDialog.Builder(this)
+            .setView(dialogView)
+            .setCancelable(false)
+            .create()
+
+        uploadDialog?.show()
+    }
+
+    private fun updateUploadProgress(progress: Int) {
+        when {
+            progress in 0..99 -> {
+                // Transferência em andamento
+                uploadProgressBar?.progress = progress
+                uploadPercentageText?.text = "$progress%"
+                uploadDescriptionText?.text = "Transferindo arquivo para o Watch..."
+            }
+
+            progress == 100 -> {
+                // Sucesso!
+                uploadProgressBar?.progress = 100
+                uploadPercentageText?.text = "100%"
+                uploadTitleText?.text = "Envio concluído"
+                uploadDescriptionText?.text = "APK enviado com sucesso! Verifique o Watch."
+
+                // Muda o ícone para checkmark
+                uploadIconView?.setImageResource(android.R.drawable.stat_sys_upload_done)
+                uploadIconView?.setColorFilter(colorSuccess)
+                uploadPercentageText?.setTextColor(colorSuccess)
+
+                // Mostra o botão OK
+                uploadProgressBar?.visibility = View.GONE
+                uploadOkButton?.visibility = View.VISIBLE
+            }
+
+            progress == -1 -> {
+                // Erro - fecha o diálogo e mostra Toast
+                dismissUploadDialog()
+                Toast.makeText(this, "Falha no envio. Verifique a conexão e tente novamente.", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun dismissUploadDialog() {
+        uploadDialog?.dismiss()
+        uploadDialog = null
+        uploadProgressBar = null
+        uploadPercentageText = null
+        uploadDescriptionText = null
+        uploadTitleText = null
+        uploadIconView = null
+        uploadOkButton = null
     }
 
     // Callbacks do Serviço
@@ -261,11 +363,23 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
     }
 
     override fun onDeviceDisconnected() {
-        runOnUiThread { updateStatusUI("Desconectado", false) }
+        runOnUiThread {
+            updateStatusUI("Desconectado", false)
+            // Se o diálogo de upload estiver aberto e houver desconexão, fecha com erro
+            if (uploadDialog?.isShowing == true) {
+                updateUploadProgress(-1)
+            }
+        }
     }
 
     override fun onError(message: String) {
-        runOnUiThread { Toast.makeText(this, message, Toast.LENGTH_LONG).show() }
+        runOnUiThread {
+            Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+            // Se houver erro durante o upload, fecha com mensagem
+            if (uploadDialog?.isShowing == true) {
+                updateUploadProgress(-1)
+            }
+        }
     }
 
     override fun onScanResult(devices: List<BluetoothDevice>) {
@@ -283,14 +397,18 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
     }
 
     override fun onUploadProgress(progress: Int) {
-        // Opcional: Atualizar algum elemento da UI com progresso
-        // Como movemos para lista, podemos usar um Toast ou atualizar o subtítulo de um item da lista se quiséssemos ser fancy
+        runOnUiThread {
+            if (uploadDialog?.isShowing == true) {
+                updateUploadProgress(progress)
+            }
+        }
     }
 
     override fun onAppListReceived(appsJson: String) {}
 
     override fun onDestroy() {
         super.onDestroy()
+        dismissUploadDialog()
         if (isBound) {
             bluetoothService?.callback = null
             unbindService(connection)

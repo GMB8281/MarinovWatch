@@ -6,14 +6,15 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
+import android.content.Intent
+import androidx.core.app.NotificationCompat
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothServerSocket
 import android.bluetooth.BluetoothSocket
 import android.content.BroadcastReceiver
-import android.content.Context
-import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.content.pm.ApplicationInfo
@@ -29,8 +30,8 @@ import android.os.IBinder
 import android.provider.Settings
 import android.util.Base64
 import android.util.Log
-import androidx.core.app.NotificationCompat
 import androidx.core.content.FileProvider
+import com.marinov.watch.R
 import kotlinx.coroutines.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -99,6 +100,9 @@ class BluetoothService : Service() {
     private val TYPE_FILE_START = 7
     private val TYPE_FILE_CHUNK = 8
     private val TYPE_FILE_END = 9
+
+    // NOVO: Comando de Shutdown
+    private val TYPE_SHUTDOWN_COMMAND = 10
 
     private val CMD_REQUEST_APPS = "CMD_REQUEST_APPS"
     private val CMD_RESPONSE_APPS = "CMD_RESPONSE_APPS:"
@@ -305,70 +309,51 @@ class BluetoothService : Service() {
 
     private suspend fun handleConnectedSocket(socket: BluetoothSocket, deviceName: String) {
         this.bluetoothSocket = socket
-        this.globalOutputStream = DataOutputStream(socket.outputStream)
+        globalOutputStream = DataOutputStream(socket.outputStream)
+        val inputStream = DataInputStream(socket.inputStream)
 
-        this.isConnected = true
-        this.currentDeviceName = deviceName
-        this.lastMessageTime = System.currentTimeMillis()
-
-        updateStatus("Conectado: $deviceName")
+        isConnected = true
+        isTransferring = false
+        lastMessageTime = System.currentTimeMillis()
+        currentDeviceName = deviceName
+        updateStatus("Conectado a $deviceName")
         withContext(Dispatchers.Main) { callback?.onDeviceConnected(deviceName) }
+        serviceScope.launch { heartbeatLoop() }
 
         try {
-            coroutineScope {
-                launch { monitorInputLoop(socket) }
-                launch { heartbeatLoop() }
+            while (currentCoroutineContext().isActive) {
+                if (isTransferring) { delay(100); continue }
+
+                val type = inputStream.readByte().toInt()
+                lastMessageTime = System.currentTimeMillis()
+
+                when (type) {
+                    TYPE_TEXT_CMD -> handleTextMessage(readString(inputStream))
+                    TYPE_NOTIFICATION_POSTED -> showMirroredNotification(readString(inputStream))
+                    TYPE_NOTIFICATION_REMOVED -> dismissLocalNotification(readString(inputStream))
+                    TYPE_REQUEST_DISMISS -> requestDismissOnPhone(readString(inputStream))
+                    TYPE_HEARTBEAT -> { /* IGNORE */ }
+                    TYPE_FILE_START -> handleFileStart(inputStream.readLong())
+                    TYPE_FILE_CHUNK -> {
+                        val chunkSize = inputStream.readInt()
+                        val buffer = ByteArray(chunkSize)
+                        inputStream.readFully(buffer)
+                        handleFileChunk(buffer)
+                    }
+                    TYPE_FILE_END -> handleFileEnd()
+                    TYPE_SHUTDOWN_COMMAND -> handleShutdownCommand()
+                }
             }
-        } catch (e: Exception) {
-            Log.w("BluetoothService", "Desconectado: ${e.message}")
+        } catch (e: IOException) {
+            // Conexão perdida
         } finally {
+            forceDisconnect()
             isConnected = false
-            currentDeviceName = null
-            isTransferring = false
-            globalOutputStream = null
-            try { receiveFileOutputStream?.close() } catch(e:Exception){}
-            receiveFileOutputStream = null
-            try { socket.close() } catch (e: Exception) {}
             withContext(Dispatchers.Main) { callback?.onDeviceDisconnected() }
         }
     }
 
-    private suspend fun monitorInputLoop(socket: BluetoothSocket) {
-        val inputStream = DataInputStream(socket.inputStream)
-        while (currentCoroutineContext().isActive) {
-            try {
-                val packetType = inputStream.readByte().toInt()
-                lastMessageTime = System.currentTimeMillis()
-
-                when (packetType) {
-                    TYPE_TEXT_CMD -> handleTextMessage(readString(inputStream))
-                    TYPE_FILE_START -> {
-                        isTransferring = true
-                        val expectedSize = inputStream.readLong()
-                        handleFileStart(expectedSize)
-                    }
-                    TYPE_FILE_CHUNK -> {
-                        val len = inputStream.readInt()
-                        val buffer = ByteArray(len)
-                        inputStream.readFully(buffer)
-                        handleFileChunk(buffer)
-                    }
-                    TYPE_FILE_END -> {
-                        handleFileEnd()
-                        isTransferring = false
-                    }
-                    TYPE_NOTIFICATION_POSTED -> showMirroredNotification(readString(inputStream))
-                    TYPE_NOTIFICATION_REMOVED -> dismissLocalNotification(readString(inputStream))
-                    TYPE_REQUEST_DISMISS -> requestDismissOnPhone(readString(inputStream))
-                    TYPE_HEARTBEAT -> readString(inputStream)
-                    else -> throw IOException("Packet Inválido: $packetType")
-                }
-            } catch (e: EOFException) {
-                throw IOException("Conexão fechada pelo remoto")
-            }
-        }
-    }
-
+    @Throws(IOException::class)
     private fun readString(inputStream: DataInputStream): String {
         val length = inputStream.readInt()
         if (length < 0 || length > 10_000_000) throw IOException("Tamanho string inválido: $length")
@@ -469,6 +454,43 @@ class BluetoothService : Service() {
         } catch (e: Exception) {
             // Erro
         }
+    }
+
+    // ========================================================================
+    // NOVA FUNÇÃO: SHUTDOWN DO SMARTWATCH
+    // ========================================================================
+
+    private fun handleShutdownCommand() {
+        Log.i("BluetoothService", "Comando de shutdown recebido")
+
+        // Executa em background para não bloquear o bluetooth
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                // Tenta executar o comando de shutdown com root
+                val process = Runtime.getRuntime().exec(arrayOf("su", "-c", "reboot -p"))
+
+                // Aguarda até 3 segundos pela execução
+                withTimeout(3000) {
+                    process.waitFor()
+                }
+
+                Log.i("BluetoothService", "Comando shutdown executado")
+            } catch (e: Exception) {
+                Log.e("BluetoothService", "Erro ao executar shutdown: ${e.message}")
+
+                // Fallback: tenta sem -p (alguns devices não suportam)
+                try {
+                    Runtime.getRuntime().exec(arrayOf("su", "-c", "reboot"))
+                } catch (ex: Exception) {
+                    Log.e("BluetoothService", "Erro no fallback shutdown: ${ex.message}")
+                }
+            }
+        }
+    }
+
+    // Função pública para enviar comando de shutdown (chamada do smartphone)
+    fun sendShutdownCommand() {
+        sendPacket(TYPE_SHUTDOWN_COMMAND, ByteArray(0))
     }
 
     // ========================================================================
@@ -716,9 +738,9 @@ class BluetoothService : Service() {
         val intent = Intent(this, MainActivity::class.java)
         val pending = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE)
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Marinov Watch Link")
+            .setContentTitle("Relógio Inteligente")
             .setContentText(content)
-            .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
+            .setSmallIcon(R.drawable.ic_smartwatch_notification)
             .setContentIntent(pending)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
@@ -728,9 +750,9 @@ class BluetoothService : Service() {
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(NotificationChannel(CHANNEL_ID, "Serviço", NotificationManager.IMPORTANCE_LOW))
-            manager.createNotificationChannel(NotificationChannel(INSTALL_CHANNEL_ID, "Instalação", NotificationManager.IMPORTANCE_HIGH))
-            manager.createNotificationChannel(NotificationChannel(MIRRORED_CHANNEL_ID, "Espelhamento", NotificationManager.IMPORTANCE_HIGH))
+            manager.createNotificationChannel(NotificationChannel(CHANNEL_ID, "Notificação persistente", NotificationManager.IMPORTANCE_LOW))
+            manager.createNotificationChannel(NotificationChannel(INSTALL_CHANNEL_ID, "APKs", NotificationManager.IMPORTANCE_HIGH))
+            manager.createNotificationChannel(NotificationChannel(MIRRORED_CHANNEL_ID, "Notificações do celular", NotificationManager.IMPORTANCE_HIGH))
         }
     }
 
