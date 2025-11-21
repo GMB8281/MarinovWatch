@@ -2,12 +2,11 @@
     <!-- Tema Base da Aplicação -->
     <style name="Theme.Smartwatch" parent="Theme.Material3.DayNight.NoActionBar">
         <!-- Cores principais (Baseadas no seu layout) -->
-        <item name="colorPrimary">#6200EE</item>
-        <item name="colorPrimaryVariant">#3700B3</item>
+        <item name="colorPrimary">#3DAADC</item>
+        <item name="colorPrimaryVariant">#2A7294</item>
         <item name="colorOnPrimary">#FFFFFF</item>
-        <!-- Cor secundária -->
-        <item name="colorSecondary">#03DAC5</item>
-        <item name="colorSecondaryVariant">#018786</item>
+        <item name="colorSecondary">#DC3D3D</item>
+        <item name="colorSecondaryVariant">#852626</item>
         <item name="colorOnSecondary">#000000</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowLightStatusBar">true</item>

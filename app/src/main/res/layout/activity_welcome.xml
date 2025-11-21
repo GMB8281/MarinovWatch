@@ -23,7 +23,7 @@
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Bem-vindo"
+            android:text="Bem-vindo!"
             android:textAppearance="@style/TextAppearance.Material3.DisplaySmall"
             android:textStyle="bold"
             android:textColor="?android:attr/textColorPrimary"/>
@@ -73,13 +73,13 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Controlador"
+                        android:text="Smartphone"
                         android:textStyle="bold"
                         android:textAppearance="@style/TextAppearance.Material3.TitleMedium"/>
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Este é o meu celular"
+                        android:text="Este é o meu smartphone."
                         android:textAppearance="@style/TextAppearance.Material3.BodyMedium"
                         android:textColor="?android:attr/textColorSecondary"/>
                 </LinearLayout>
@@ -120,13 +120,13 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Dispositivo"
+                        android:text="Relógio inteligente"
                         android:textStyle="bold"
                         android:textAppearance="@style/TextAppearance.Material3.TitleMedium"/>
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Este é o meu relógio"
+                        android:text="Este é o meu relógio inteligente."
                         android:textAppearance="@style/TextAppearance.Material3.BodyMedium"
                         android:textColor="?android:attr/textColorSecondary"/>
                 </LinearLayout>
