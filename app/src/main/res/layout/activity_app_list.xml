@@ -37,34 +37,42 @@
     <FrameLayout
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        app:layout_behavior="@string/appbar_scrolling_view_behavior"
-        android:paddingTop="8dp">
+        app:layout_behavior="@string/appbar_scrolling_view_behavior">
 
-        <ProgressBar
-            android:id="@+id/progressBarList"
+        <!-- Container Centralizado para Loading e Mensagens -->
+        <LinearLayout
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_gravity="center_horizontal"
-            android:layout_marginTop="32dp"
-            android:indeterminateTint="?attr/colorOnPrimary"
-            android:visibility="gone"/>
-
-        <TextView
-            android:id="@+id/tvEmptyList"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
             android:layout_gravity="center"
-            android:padding="32dp"
-            android:text="Carregando lista..."
-            android:textAlignment="center"
-            android:textColor="?android:attr/textColorSecondary"
-            android:textSize="16sp" />
+            android:orientation="vertical"
+            android:gravity="center"
+            android:padding="32dp">
+
+            <ProgressBar
+                android:id="@+id/progressBarList"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:indeterminateTint="?attr/colorOnPrimary"
+                android:layout_marginBottom="16dp"
+                android:visibility="gone"/>
+
+            <TextView
+                android:id="@+id/tvEmptyList"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Carregando lista..."
+                android:textAlignment="center"
+                android:textColor="?android:attr/textColorSecondary"
+                android:textSize="16sp"
+                android:visibility="visible"/>
+        </LinearLayout>
 
         <androidx.recyclerview.widget.RecyclerView
             android:id="@+id/recyclerViewApps"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:clipToPadding="false"
+            android:paddingTop="8dp"
             android:paddingBottom="24dp"
             android:visibility="gone"
             tools:listitem="@layout/item_app"/>

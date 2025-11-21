@@ -15,10 +15,8 @@ import android.view.ViewGroup
 import android.widget.Button
 import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
-import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.Toolbar
 import androidx.lifecycle.lifecycleScope
@@ -36,7 +34,9 @@ class NotificationSettingsActivity : AppCompatActivity() {
     private lateinit var layoutAppsSection: LinearLayout
     private lateinit var btnOpenSettings: Button
     private lateinit var recyclerView: RecyclerView
-    private lateinit var progressBar: ProgressBar
+
+    // Agora referenciamos o container de loading inteiro
+    private lateinit var layoutLoadingApps: View
 
     private lateinit var prefs: SharedPreferences
     private lateinit var appAdapter: AppNotificationAdapter
@@ -55,7 +55,11 @@ class NotificationSettingsActivity : AppCompatActivity() {
         initViews()
         setupMasterSwitch()
         setupRecyclerView()
-        loadInstalledApps()
+
+        // Carrega apps se tiver permissão, senão a UI já trata no updateUiState
+        if (isNotificationServiceEnabled()) {
+            loadInstalledApps()
+        }
     }
 
     private fun initViews() {
@@ -64,87 +68,72 @@ class NotificationSettingsActivity : AppCompatActivity() {
         layoutAppsSection = findViewById(R.id.layoutAppsSection)
         btnOpenSettings = findViewById(R.id.btnOpenSettings)
         recyclerView = findViewById(R.id.recyclerViewApps)
-        progressBar = findViewById(R.id.progressBarApps)
+
+        // Novo ID do container
+        layoutLoadingApps = findViewById(R.id.layoutLoadingApps)
     }
 
     override fun onResume() {
         super.onResume()
-        // Verifica permissões e atualiza estado sempre que a tela ganha foco
         updateUiState()
     }
 
     private fun setupMasterSwitch() {
-        // Configuração inicial (padrão false se não existir)
         if (!prefs.contains("notification_mirroring_enabled")) {
             prefs.edit().putBoolean("notification_mirroring_enabled", false).apply()
         }
 
-        // Define estado inicial visual sem disparar listener ainda (será tratado no updateUiState)
         val isEnabled = prefs.getBoolean("notification_mirroring_enabled", false)
         switchEnable.isChecked = isEnabled
 
         switchEnable.setOnCheckedChangeListener { _, isChecked ->
             prefs.edit().putBoolean("notification_mirroring_enabled", isChecked).apply()
-            updateUiState() // Atualiza a UI (alpha da lista, etc)
+            updateUiState()
         }
     }
 
-    // --- LÓGICA CENTRAL DE ESTADO ---
     private fun updateUiState() {
         val hasPermission = isNotificationServiceEnabled()
 
-        // Lógica de Auto-Ativação:
-        // Se o usuário clicou em "Conceder" anteriormente (flag waiting_for_permission)
-        // E agora voltou com a permissão concedida -> Ativa o switch automaticamente.
         if (hasPermission && prefs.getBoolean("waiting_for_permission", false)) {
             prefs.edit()
-                .remove("waiting_for_permission") // Limpa a flag
-                .putBoolean("notification_mirroring_enabled", true) // Salva como ativado
+                .remove("waiting_for_permission")
+                .putBoolean("notification_mirroring_enabled", true)
                 .apply()
-
-            // Atualiza visualmente o switch (o listener vai disparar, mas o valor já está salvo)
             switchEnable.isChecked = true
         }
 
         val isSwitchOn = prefs.getBoolean("notification_mirroring_enabled", false)
 
-        // Sincroniza visualmente caso tenha mudado via auto-ativação ou preferência externa
         if (switchEnable.isChecked != isSwitchOn) {
             switchEnable.isChecked = isSwitchOn
         }
 
         if (!hasPermission) {
-            // --- SEM PERMISSÃO ---
-            // 1. Bloqueia o switch: Usuário não pode ativar sem permissão
             switchEnable.isEnabled = false
-            switchEnable.isChecked = false // Visualmente desligado (forçado)
-
-            // 2. Mostra aviso e botão de ação
+            switchEnable.isChecked = false
             layoutPermissionWarning.visibility = View.VISIBLE
             layoutAppsSection.visibility = View.GONE
 
             btnOpenSettings.setOnClickListener {
-                // Marca que estamos indo buscar a permissão para auto-ativar na volta
                 prefs.edit().putBoolean("waiting_for_permission", true).apply()
                 openNotificationAccessSettings()
             }
         } else {
-            // --- COM PERMISSÃO ---
-            // 1. Libera o switch
             switchEnable.isEnabled = true
-
-            // 2. Esconde aviso, Mostra lista
             layoutPermissionWarning.visibility = View.GONE
             layoutAppsSection.visibility = View.VISIBLE
 
-            // 3. Controla opacidade da lista baseado no switch (On/Off)
             if (isSwitchOn) {
                 recyclerView.alpha = 1.0f
                 recyclerView.isEnabled = true
-                // Opcional: Se quiser bloquear cliques nos itens quando desligado, precisaria ajustar o Adapter
             } else {
                 recyclerView.alpha = 0.4f
-                // Lista visível mas "apagada" para indicar que o mestre está desligado
+            }
+
+            // Se a lista estiver vazia e não estiver carregando, tenta carregar
+            if (appAdapter.itemCount == 0 && layoutLoadingApps.visibility == View.GONE) {
+                loadInstalledApps()
             }
         }
     }
@@ -156,14 +145,12 @@ class NotificationSettingsActivity : AppCompatActivity() {
     }
 
     private fun loadInstalledApps() {
-        progressBar.visibility = View.VISIBLE
+        // Mostra o container de loading (Texto + Spinner)
+        layoutLoadingApps.visibility = View.VISIBLE
         recyclerView.visibility = View.GONE
 
         lifecycleScope.launch(Dispatchers.IO) {
             val pm = packageManager
-            val intent = Intent(Intent.ACTION_MAIN, null)
-            intent.addCategory(Intent.CATEGORY_LAUNCHER)
-
             val appsList = mutableListOf<AppNotificationItem>()
 
             val allPackages = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
@@ -175,6 +162,7 @@ class NotificationSettingsActivity : AppCompatActivity() {
             val packageNamesFound = mutableSetOf<String>()
 
             for (appInfo in allPackages) {
+                // Ignora o próprio app
                 if (appInfo.packageName == packageName) continue
 
                 try {
@@ -188,14 +176,14 @@ class NotificationSettingsActivity : AppCompatActivity() {
             }
             appsList.sortBy { it.appName.lowercase() }
 
-            // Se é a primeira vez (nenhuma config salva), seleciona TODOS por padrão
             if (!prefs.contains("allowed_notif_packages")) {
                 prefs.edit().putStringSet("allowed_notif_packages", packageNamesFound).apply()
                 appAdapter.reloadAllowedPackages()
             }
 
             withContext(Dispatchers.Main) {
-                progressBar.visibility = View.GONE
+                // Esconde o container de loading
+                layoutLoadingApps.visibility = View.GONE
                 recyclerView.visibility = View.VISIBLE
                 appAdapter.setData(appsList)
             }
@@ -208,8 +196,6 @@ class NotificationSettingsActivity : AppCompatActivity() {
         return flat != null && flat.contains(cn.flattenToString())
     }
 
-    // Nota: O diálogo de permissão "automático" ao clicar no switch foi removido
-    // pois agora o switch fica bloqueado até ter permissão. Apenas o botão "Conceder" chama isso.
     private fun openNotificationAccessSettings() {
         try {
             startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
@@ -227,7 +213,7 @@ class NotificationSettingsActivity : AppCompatActivity() {
     }
 }
 
-// --- Classes do Adapter permanecem as mesmas ---
+// --- Classes do Adapter ---
 data class AppNotificationItem(
     val appName: String,
     val packageName: String,

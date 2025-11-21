@@ -34,15 +34,18 @@
         </com.google.android.material.appbar.CollapsingToolbarLayout>
     </com.google.android.material.appbar.AppBarLayout>
 
-    <!-- Conteúdo Principal com Scroll -->
+    <!-- Conteúdo Principal com Scroll
+         fillViewport="true" é essencial para o weight funcionar dentro do ScrollView -->
     <androidx.core.widget.NestedScrollView
         android:layout_width="match_parent"
         android:layout_height="match_parent"
+        android:fillViewport="true"
         app:layout_behavior="@string/appbar_scrolling_view_behavior">
 
+        <!-- Altura alterada para match_parent para permitir expansão -->
         <LinearLayout
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
+            android:layout_height="match_parent"
             android:orientation="vertical"
             android:paddingBottom="24dp">
 
@@ -136,11 +139,14 @@
                     style="@style/Widget.MaterialComponents.Button.TextButton"/>
             </LinearLayout>
 
-            <!-- Card 3: Seção da Lista de Apps -->
+            <!-- Card 3: Seção da Lista de Apps
+                 Adicionado layout_weight=1 para preencher o resto da tela
+                 Se o conteúdo (lista) crescer, o wrap_content permite scroll normal -->
             <LinearLayout
                 android:id="@+id/layoutAppsSection"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:layout_weight="1"
                 android:orientation="vertical"
                 android:visibility="gone">
 
@@ -154,16 +160,34 @@
                     android:layout_marginStart="24dp"
                     android:layout_marginBottom="12dp"/>
 
-                <!-- Loading -->
-                <ProgressBar
-                    android:id="@+id/progressBarApps"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_gravity="center"
-                    android:indeterminateTint="?attr/colorOnPrimary"
-                    android:visibility="gone"/>
+                <!-- Loading Group (Novo Container Centralizado)
+                     Altura 0dp + weight=1 garante que o loading ocupe todo o espaço disponível
+                     abaixo do título, centralizando o conteúdo visualmente -->
+                <LinearLayout
+                    android:id="@+id/layoutLoadingApps"
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_weight="1"
+                    android:orientation="vertical"
+                    android:gravity="center"
+                    android:padding="32dp"
+                    android:visibility="gone">
 
-                <!-- Lista de Apps -->
+                    <ProgressBar
+                        android:id="@+id/progressBarApps"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:indeterminateTint="?attr/colorOnPrimary"/>
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Carregando aplicativos..."
+                        android:layout_marginTop="16dp"
+                        android:textColor="?android:attr/textColorSecondary"/>
+                </LinearLayout>
+
+                <!-- Lista de Apps (sem weight, expande naturalmente) -->
                 <androidx.recyclerview.widget.RecyclerView
                     android:id="@+id/recyclerViewApps"
                     android:layout_width="match_parent"
