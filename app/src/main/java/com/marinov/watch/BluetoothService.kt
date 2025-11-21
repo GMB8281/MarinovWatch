@@ -156,7 +156,15 @@ class BluetoothService : Service() {
         const val INSTALL_NOTIFICATION_ID = 2
         const val MIRRORED_NOTIFICATION_ID_START = 1000
 
-        const val CHANNEL_ID = "bluetooth_service_channel"
+        // --- CANAIS DE NOTIFICAÇÃO ---
+        // Canal antigo (pode ser mantido para compatibilidade ou removido se preferir limpar dados)
+        const val CHANNEL_ID_OLD = "bluetooth_service_channel"
+
+        // Novos Canais Categorizados
+        const val CHANNEL_ID_WAITING = "channel_status_waiting"
+        const val CHANNEL_ID_CONNECTED = "channel_status_connected"
+        const val CHANNEL_ID_DISCONNECTED = "channel_status_disconnected"
+
         const val INSTALL_CHANNEL_ID = "install_channel"
         const val MIRRORED_CHANNEL_ID = "mirrored_notifications"
 
@@ -232,6 +240,7 @@ class BluetoothService : Service() {
             return START_STICKY
         }
 
+        // Status inicial
         val notification = createNotification("Aguardando conexão...")
 
         if (Build.VERSION.SDK_INT >= 34) {
@@ -748,7 +757,7 @@ class BluetoothService : Service() {
     }
 
     private fun showErrorNotification(msg: String) {
-        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID_DISCONNECTED)
             .setContentTitle("Erro")
             .setContentText(msg)
             .setSmallIcon(android.R.drawable.stat_notify_error)
@@ -872,7 +881,20 @@ class BluetoothService : Service() {
     private fun createNotification(content: String): Notification {
         val intent = Intent(this, MainActivity::class.java)
         val pending = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE)
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+
+        // Lógica de seleção de canal baseada no Status
+        val channelId = when {
+            // Se estiver conectado, usa o canal de conexão
+            isConnected || content.startsWith("Conectado") -> CHANNEL_ID_CONNECTED
+
+            // Se estiver aguardando, escaneando ou iniciando, usa o canal de "Aguardando"
+            content.contains("Aguardando") || content.contains("Escaneando") || content.contains("Iniciado") -> CHANNEL_ID_WAITING
+
+            // Qualquer outra coisa (Desconectado, Reconectando, Tentando, Parado, Erro) cai aqui
+            else -> CHANNEL_ID_DISCONNECTED
+        }
+
+        return NotificationCompat.Builder(this, channelId)
             .setContentTitle("Relógio Inteligente")
             .setContentText(content)
             .setSmallIcon(R.drawable.ic_smartwatch_notification)
@@ -884,7 +906,34 @@ class BluetoothService : Service() {
 
     private fun createNotificationChannel() {
         val manager = getSystemService(NotificationManager::class.java)
-        manager.createNotificationChannel(NotificationChannel(CHANNEL_ID, "Notificação persistente", NotificationManager.IMPORTANCE_LOW))
+
+        // 1. Canal: Aguardando conexão
+        manager.createNotificationChannel(
+            NotificationChannel(
+                CHANNEL_ID_WAITING,
+                "Notificação persistente - aguardando conexão",
+                NotificationManager.IMPORTANCE_LOW
+            )
+        )
+
+        // 2. Canal: Conectado
+        manager.createNotificationChannel(
+            NotificationChannel(
+                CHANNEL_ID_CONNECTED,
+                "Notificação persistente - conectado",
+                NotificationManager.IMPORTANCE_LOW
+            )
+        )
+
+        // 3. Canal: Desconectado (inclui tentativas de reconexão)
+        manager.createNotificationChannel(
+            NotificationChannel(
+                CHANNEL_ID_DISCONNECTED,
+                "Notificação persistente - desconectado",
+                NotificationManager.IMPORTANCE_LOW
+            )
+        )
+
         manager.createNotificationChannel(NotificationChannel(INSTALL_CHANNEL_ID, "APKs", NotificationManager.IMPORTANCE_HIGH))
         manager.createNotificationChannel(NotificationChannel(MIRRORED_CHANNEL_ID, "Notificações do celular", NotificationManager.IMPORTANCE_HIGH))
     }
