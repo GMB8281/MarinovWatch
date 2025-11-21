@@ -5,22 +5,29 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
-import android.widget.Toast
+import android.provider.Settings
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.content.edit
+import androidx.core.net.toUri
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.card.MaterialCardView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import androidx.core.content.edit
 
 class WelcomeActivity : AppCompatActivity() {
 
     private val requestPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
             // Independente do resultado, prosseguimos (o app trata falta de permissão depois se precisar)
+        }
+
+    private val installPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+            // Após o usuário interagir com a tela de permissão, finalizamos o setup
+            finishSetup("WATCH")
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -35,7 +42,16 @@ class WelcomeActivity : AppCompatActivity() {
 
         cardSmartphone.setOnClickListener { finishSetup("PHONE") }
         cardWatch.setOnClickListener {
-            // Se for Watch, primeiro verifica/solicita root
+            requestInstallPermission()
+        }
+    }
+
+    private fun requestInstallPermission() {
+        if (!packageManager.canRequestPackageInstalls()) {
+            val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
+            intent.data = "package:$packageName".toUri()
+            installPermissionLauncher.launch(intent)
+        } else {
             checkRootAndSetup()
         }
     }
@@ -74,12 +90,6 @@ class WelcomeActivity : AppCompatActivity() {
     private fun finishSetup(type: String) {
         val prefs = getSharedPreferences("AppPrefs", MODE_PRIVATE)
         prefs.edit { putString("device_type", type) }
-
-        // Se for Watch, mostra mensagem sobre root
-        if (type == "WATCH") {
-            Toast.makeText(this, "Conceda acesso root quando solicitado", Toast.LENGTH_LONG).show()
-        }
-
         startActivity(Intent(this, MainActivity::class.java))
         finish()
     }

@@ -6,15 +6,14 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
-import android.content.Context
-import android.content.Intent
-import androidx.core.app.NotificationCompat
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothServerSocket
 import android.bluetooth.BluetoothSocket
 import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.content.pm.ApplicationInfo
@@ -30,14 +29,36 @@ import android.os.IBinder
 import android.provider.Settings
 import android.util.Base64
 import android.util.Log
+import androidx.core.app.NotificationCompat
 import androidx.core.content.FileProvider
-import com.marinov.watch.R
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.*
+import java.io.ByteArrayOutputStream
+import java.io.DataInputStream
+import java.io.DataOutputStream
+import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import androidx.core.net.toUri
+import androidx.core.graphics.createBitmap
+import androidx.core.graphics.scale
+import androidx.core.content.edit
 
 class BluetoothService : Service() {
 
@@ -167,8 +188,8 @@ class BluetoothService : Service() {
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
     override fun onCreate() {
         super.onCreate()
-        prefs = getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-        val btManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+        prefs = getSharedPreferences(PREF_NAME, MODE_PRIVATE)
+        val btManager = getSystemService(BLUETOOTH_SERVICE) as BluetoothManager
         bluetoothAdapter = btManager.adapter
         createNotificationChannel()
 
@@ -179,8 +200,8 @@ class BluetoothService : Service() {
         val filterWatch = IntentFilter(ACTION_WATCH_DISMISSED_LOCAL)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(internalReceiver, filterInternal, Context.RECEIVER_NOT_EXPORTED)
-            registerReceiver(watchDismissReceiver, filterWatch, Context.RECEIVER_NOT_EXPORTED)
+            registerReceiver(internalReceiver, filterInternal, RECEIVER_NOT_EXPORTED)
+            registerReceiver(watchDismissReceiver, filterWatch, RECEIVER_NOT_EXPORTED)
         } else {
             registerReceiver(internalReceiver, filterInternal)
             registerReceiver(watchDismissReceiver, filterWatch)
@@ -234,7 +255,7 @@ class BluetoothService : Service() {
                             val socket = device.createRfcommSocketToServiceRecord(APP_UUID)
                             socket.connect()
                             device to socket
-                        } catch (e: IOException) { null }
+                        } catch (_: IOException) { null }
                     }
                 }
                 jobs.awaitAll().filterNotNull().forEach { successfulConnections.add(it) }
@@ -248,7 +269,7 @@ class BluetoothService : Service() {
                     savePreference("last_mac", device.address)
                     startAutoReconnectLoop(device, socket)
                 } else {
-                    successfulConnections.forEach { try { it.second.close() } catch (e: Exception){} }
+                    successfulConnections.forEach { try { it.second.close() } catch (_: Exception){} }
                     callback?.onScanResult(successfulConnections.map { it.first })
                 }
             }
@@ -273,10 +294,10 @@ class BluetoothService : Service() {
                         socketToUse = device.createRfcommSocketToServiceRecord(APP_UUID)
                         socketToUse!!.connect()
                     }
-                    handleConnectedSocket(socketToUse!!, device.name)
+                    handleConnectedSocket(socketToUse, device.name)
                     socketToUse = null
                     if (isActive) { updateStatus("Reconectando..."); delay(3000) }
-                } catch (e: IOException) {
+                } catch (_: IOException) {
                     socketToUse = null
                     if (isActive) { updateStatus("Tentando conectar..."); delay(5000) }
                 }
@@ -291,16 +312,16 @@ class BluetoothService : Service() {
         serverJob = serviceScope.launch {
             while (isActive) {
                 updateStatus("Aguardando conexão...")
-                var serverSocket: BluetoothServerSocket? = null
+                var serverSocket: BluetoothServerSocket?
                 try { serverSocket = bluetoothAdapter?.listenUsingRfcommWithServiceRecord(APP_NAME, APP_UUID) }
-                catch (e: IOException) { delay(3000); continue }
+                catch (_: IOException) { delay(3000); continue }
 
                 var socket: BluetoothSocket? = null
                 while (socket == null && isActive) {
-                    try { socket = serverSocket?.accept(5000) } catch (e: IOException) {}
+                    try { socket = serverSocket?.accept(5000) } catch (_: IOException) {}
                 }
                 if (socket != null) {
-                    try { serverSocket?.close() } catch (e: Exception) {}
+                    try { serverSocket?.close() } catch (_: Exception) {}
                     handleConnectedSocket(socket, socket.remoteDevice?.name ?: "Dispositivo")
                 }
             }
@@ -344,7 +365,7 @@ class BluetoothService : Service() {
                     TYPE_SHUTDOWN_COMMAND -> handleShutdownCommand()
                 }
             }
-        } catch (e: IOException) {
+        } catch (_: IOException) {
             // Conexão perdida
         } finally {
             forceDisconnect()
@@ -356,7 +377,7 @@ class BluetoothService : Service() {
     @Throws(IOException::class)
     private fun readString(inputStream: DataInputStream): String {
         val length = inputStream.readInt()
-        if (length < 0 || length > 10_000_000) throw IOException("Tamanho string inválido: $length")
+        if (length !in 0..10_000_000) throw IOException("Tamanho string inválido: $length")
         val buffer = ByteArray(length)
         inputStream.readFully(buffer)
         return String(buffer, Charsets.UTF_8)
@@ -371,12 +392,12 @@ class BluetoothService : Service() {
                 break
             }
             try { sendPacket(TYPE_HEARTBEAT, CMD_PING.toByteArray()) }
-            catch (e: Exception) { break }
+            catch (_: Exception) { break }
         }
     }
 
     private fun forceDisconnect() {
-        try { bluetoothSocket?.close() } catch (e: Exception) {}
+        try { bluetoothSocket?.close() } catch (_: Exception) {}
     }
 
     private fun sendPacket(type: Int, data: ByteArray) {
@@ -390,7 +411,7 @@ class BluetoothService : Service() {
                     out.write(data)
                     out.flush()
                 }
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 forceDisconnect()
             }
         }
@@ -412,7 +433,7 @@ class BluetoothService : Service() {
             receiveFileOutputStream = FileOutputStream(receiveFile)
             receiveTotalSize = expectedSize
             receiveBytesRead = 0
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             receiveFileOutputStream = null
         }
     }
@@ -423,7 +444,7 @@ class BluetoothService : Service() {
                 receiveFileOutputStream!!.write(data)
                 receiveBytesRead += data.size
                 lastMessageTime = System.currentTimeMillis()
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 // Erro silencioso
             }
         }
@@ -439,11 +460,9 @@ class BluetoothService : Service() {
                 CoroutineScope(Dispatchers.Main).launch {
                     try {
                         // Verifica permissão ANTES de tentar mostrar notificação de instalação
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                            if (!packageManager.canRequestPackageInstalls()) {
-                                showPermissionNotification()
-                                return@launch
-                            }
+                        if (!packageManager.canRequestPackageInstalls()) {
+                            showPermissionNotification()
+                            return@launch
                         }
                         showInstallNotification(receiveFile!!)
                     } catch (e: Exception) {
@@ -451,7 +470,7 @@ class BluetoothService : Service() {
                     }
                 }
             }
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             // Erro
         }
     }
@@ -585,14 +604,14 @@ class BluetoothService : Service() {
             .setAutoCancel(true)
             .setContentIntent(pendingIntent)
 
-        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         manager.notify(INSTALL_NOTIFICATION_ID, builder.build())
     }
 
     // Notificação especial para pedir permissão no Watch
     private fun showPermissionNotification() {
         val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
-            data = Uri.parse("package:$packageName")
+            data = "package:$packageName".toUri()
             flags = Intent.FLAG_ACTIVITY_NEW_TASK
         }
 
@@ -609,7 +628,7 @@ class BluetoothService : Service() {
             .setAutoCancel(true)
             .setContentIntent(pendingIntent)
 
-        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         manager.notify(INSTALL_NOTIFICATION_ID, builder.build())
     }
 
@@ -621,7 +640,7 @@ class BluetoothService : Service() {
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setAutoCancel(true)
 
-        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         manager.notify(999, builder.build())
     }
 
@@ -651,7 +670,7 @@ class BluetoothService : Service() {
                     appJson.put("package", appInfo.packageName)
                     appJson.put("icon", drawableToBase64(pm.getApplicationIcon(appInfo)))
                     appsList.put(appJson)
-                } catch (e: Exception) {}
+                } catch (_: Exception) {}
             }
         }
         return appsList.toString()
@@ -659,13 +678,16 @@ class BluetoothService : Service() {
 
     private fun drawableToBase64(drawable: Drawable): String {
         val bitmap: Bitmap = if (drawable is BitmapDrawable) drawable.bitmap else {
-            val bmp = Bitmap.createBitmap(drawable.intrinsicWidth.coerceAtLeast(1), drawable.intrinsicHeight.coerceAtLeast(1), Bitmap.Config.ARGB_8888)
+            val bmp = createBitmap(
+                drawable.intrinsicWidth.coerceAtLeast(1),
+                drawable.intrinsicHeight.coerceAtLeast(1)
+            )
             val canvas = Canvas(bmp)
             drawable.setBounds(0, 0, canvas.width, canvas.height)
             drawable.draw(canvas)
             bmp
         }
-        val resized = Bitmap.createScaledBitmap(bitmap, 48, 48, false)
+        val resized = bitmap.scale(48, 48, false)
         val outputStream = ByteArrayOutputStream()
         resized.compress(Bitmap.CompressFormat.PNG, 100, outputStream)
         return Base64.encodeToString(outputStream.toByteArray(), Base64.NO_WRAP)
@@ -694,13 +716,13 @@ class BluetoothService : Service() {
                 .setDeleteIntent(deletePending)
                 .build()
 
-            (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(notifId, notification)
-        } catch (e: Exception) {}
+            (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).notify(notifId, notification)
+        } catch (_: Exception) {}
     }
 
     private fun dismissLocalNotification(key: String) {
         notificationMap[key]?.let { id ->
-            (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).cancel(id)
+            (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).cancel(id)
             notificationMap.remove(key)
         }
     }
@@ -714,7 +736,7 @@ class BluetoothService : Service() {
 
     fun resetApp() {
         stopConnectionLoopOnly()
-        prefs.edit().clear().apply()
+        prefs.edit { clear() }
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -729,7 +751,7 @@ class BluetoothService : Service() {
 
     private fun updateStatus(text: String) {
         currentStatus = text
-        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         manager.notify(NOTIFICATION_ID, createNotification(text))
         CoroutineScope(Dispatchers.Main).launch { callback?.onStatusChanged(text) }
     }
@@ -748,22 +770,20 @@ class BluetoothService : Service() {
     }
 
     private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(NotificationChannel(CHANNEL_ID, "Notificação persistente", NotificationManager.IMPORTANCE_LOW))
-            manager.createNotificationChannel(NotificationChannel(INSTALL_CHANNEL_ID, "APKs", NotificationManager.IMPORTANCE_HIGH))
-            manager.createNotificationChannel(NotificationChannel(MIRRORED_CHANNEL_ID, "Notificações do celular", NotificationManager.IMPORTANCE_HIGH))
-        }
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(NotificationChannel(CHANNEL_ID, "Notificação persistente", NotificationManager.IMPORTANCE_LOW))
+        manager.createNotificationChannel(NotificationChannel(INSTALL_CHANNEL_ID, "APKs", NotificationManager.IMPORTANCE_HIGH))
+        manager.createNotificationChannel(NotificationChannel(MIRRORED_CHANNEL_ID, "Notificações do celular", NotificationManager.IMPORTANCE_HIGH))
     }
 
     private fun savePreference(key: String, value: String) {
-        prefs.edit().putString(key, value).apply()
+        prefs.edit { putString(key, value) }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        try { unregisterReceiver(internalReceiver) } catch(e:Exception){}
-        try { unregisterReceiver(watchDismissReceiver) } catch(e:Exception){}
+        try { unregisterReceiver(internalReceiver) } catch(_:Exception){}
+        try { unregisterReceiver(watchDismissReceiver) } catch(_:Exception){}
         serviceScope.cancel()
         forceDisconnect()
     }
