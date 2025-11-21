@@ -10,6 +10,7 @@ import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
@@ -23,8 +24,17 @@ import kotlinx.coroutines.withContext
 class WelcomeActivity : AppCompatActivity() {
 
     private val requestPermissionLauncher =
-        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-            // Independente do resultado, prosseguimos
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
+            // Verifica se a localização "durante o uso" foi concedida
+            val fineLocationGranted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] ?: false
+
+            if (fineLocationGranted) {
+                // Se deu permissão básica, agora tentamos pedir a permissão "O Tempo Todo"
+                checkAndRequestBackgroundLocation()
+            }
+        }
+    private val backgroundLocationLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) {
         }
 
     private val installPermissionLauncher =
@@ -32,7 +42,6 @@ class WelcomeActivity : AppCompatActivity() {
             checkDndPermissionAndFinish()
         }
 
-    // Launcher para permissão de DND (Não Perturbe)
     private val dndPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
             finishSetup("WATCH")
@@ -55,10 +64,39 @@ class WelcomeActivity : AppCompatActivity() {
         }
     }
 
+    // Lógica para solicitar Localização em Background ("O Tempo Todo")
+    private fun checkAndRequestBackgroundLocation() {
+        // Background Location só existe no Android 10 (Q) ou superior
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val hasBackground = ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.ACCESS_BACKGROUND_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
+
+            if (!hasBackground) {
+                // No Android 11+ (R), é recomendável explicar ao usuário antes de pedir,
+                // pois o sistema irá redirecionar para as Configurações.
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    AlertDialog.Builder(this)
+                        .setTitle("Permissão necessária.")
+                        .setMessage("Para que seja possível exibir o SSID da rede Wi-Fi conectada ao relógio inteligente, é necessário permissão de localização avançada. Para isso, selecione 'Pemitir o tempo todo' na tela a seguir.")
+                        .setPositiveButton("Entendi") { _, _ ->
+                            backgroundLocationLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+                        }
+                        .setNegativeButton("Agora não", null)
+                        .show()
+                } else {
+                    // Android 10 pede direto no popup
+                    backgroundLocationLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+                }
+            }
+        }
+    }
+
     // 2. Faz a verificação de Root e DEPOIS chama a permissão de instalação.
     private fun checkRootAndSetup() {
         lifecycleScope.launch(Dispatchers.IO) {
-            checkRootAccess() // Essa chamada dispara o prompt de root
+            checkRootAccess() // Essa chamada dispara o prompt de root (se houver magisk/su)
 
             withContext(Dispatchers.Main) {
                 // Após o prompt de root ser tratado, pedimos a permissão de instalação
@@ -69,7 +107,7 @@ class WelcomeActivity : AppCompatActivity() {
 
     // 3. Chamado após a verificação de root.
     private fun requestInstallPermission() {
-        if (!packageManager.canRequestPackageInstalls()) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
             val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
             intent.data = "package:$packageName".toUri()
             installPermissionLauncher.launch(intent)
@@ -111,29 +149,33 @@ class WelcomeActivity : AppCompatActivity() {
 
     private fun checkAndRequestPermissions() {
         val permissions = mutableListOf<String>()
+
+        // Solicita permissões básicas (Foreground)
+        permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
+        permissions.add(Manifest.permission.ACCESS_COARSE_LOCATION)
+
+        // Permissões de Bluetooth específicas do Android 12+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             permissions.add(Manifest.permission.BLUETOOTH_SCAN)
             permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
             permissions.add(Manifest.permission.BLUETOOTH_ADVERTISE)
-        } else {
-            permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
         }
 
-        // Permissão necessária para ler SSID do Wi-Fi em versões mais antigas
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
-            permissions.add(Manifest.permission.ACCESS_COARSE_LOCATION)
-        }
-
+        // Notificações no Android 13+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             permissions.add(Manifest.permission.POST_NOTIFICATIONS)
         }
 
+        // Filtra o que falta
         val missing = permissions.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
 
         if (missing.isNotEmpty()) {
             requestPermissionLauncher.launch(permissions.toTypedArray())
+        } else {
+            // Se já tem as básicas, checa se falta a Background
+            checkAndRequestBackgroundLocation()
         }
     }
 

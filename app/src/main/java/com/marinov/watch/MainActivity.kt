@@ -1,15 +1,17 @@
 package com.marinov.watch
 
+import android.Manifest
 import android.bluetooth.BluetoothDevice
 import android.content.ComponentName
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import android.content.res.ColorStateList
+import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
 import android.os.IBinder
-import android.util.TypedValue
 import android.view.LayoutInflater
 import android.view.View
 import android.widget.Button
@@ -40,7 +42,7 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
     private lateinit var appBarLayout: AppBarLayout
     private lateinit var mainContentScrollView: NestedScrollView
 
-    // Watch Status UI (NOVO)
+    // Watch Status UI
     private lateinit var cardWatchStatus: MaterialCardView
     private lateinit var tvBatteryPercent: TextView
     private lateinit var imgBatteryIcon: ImageView
@@ -60,10 +62,10 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
     private var isBound = false
     private var isPhoneMode = true
 
-    // Estado local do DND para alternância
+    // Estado local do DND
     private var currentDndState = false
 
-    // Diálogo de Upload
+    // Diálogo Upload
     private var uploadDialog: AlertDialog? = null
     private var uploadProgressBar: ProgressBar? = null
     private var uploadPercentageText: TextView? = null
@@ -71,12 +73,6 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
     private var uploadTitleText: TextView? = null
     private var uploadIconView: ImageView? = null
     private var uploadOkButton: Button? = null
-
-    // Cores dinâmicas
-    private var colorError = 0
-    private var colorSuccess = 0
-    private var colorTextPrimary = 0
-    private var colorTextSecondary = 0
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(className: ComponentName, service: IBinder) {
@@ -107,14 +103,13 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
 
         prefs = getSharedPreferences("AppPrefs", MODE_PRIVATE)
 
-        if (!prefs.contains("device_type")) {
+        if (!prefs.contains("device_type") || hasMissingPermissions()) {
             startActivity(Intent(this, WelcomeActivity::class.java))
             finish()
             return
         }
 
         setContentView(R.layout.activity_main)
-        resolveThemeColors()
         initViews()
 
         setSupportActionBar(toolbar)
@@ -127,15 +122,8 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
         bindToService()
     }
 
-    private fun resolveThemeColors() {
-        val typedValue = TypedValue()
-        theme.resolveAttribute(android.R.attr.colorError, typedValue, true)
-        colorError = typedValue.data
-        colorSuccess = ContextCompat.getColor(this, android.R.color.holo_green_dark)
-        theme.resolveAttribute(android.R.attr.textColorPrimary, typedValue, true)
-        colorTextPrimary = typedValue.data
-        theme.resolveAttribute(android.R.attr.textColorSecondary, typedValue, true)
-        colorTextSecondary = typedValue.data
+    private fun hasMissingPermissions(): Boolean {
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED
     }
 
     private fun initViews() {
@@ -148,7 +136,7 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
         progressBarMain = findViewById(R.id.progressBarMain)
         recyclerViewMenu = findViewById(R.id.recyclerViewMenu)
 
-        // Views de Status do Watch (NOVO)
+        // Views Status Watch
         cardWatchStatus = findViewById(R.id.cardWatchStatus)
         tvBatteryPercent = findViewById(R.id.tvBatteryPercent)
         imgBatteryIcon = findViewById(R.id.imgBatteryIcon)
@@ -179,10 +167,8 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
     private fun setupDndClickListener() {
         layoutDndAction.setOnClickListener {
             if (bluetoothService?.isConnected == true) {
-                // Inverte o estado atual e envia comando
                 val newState = !currentDndState
                 bluetoothService?.sendDndCommand(newState)
-                // Feedback visual imediato (será confirmado pelo callback depois)
                 updateDndUI(newState)
             } else {
                 Toast.makeText(this, "Não conectado", Toast.LENGTH_SHORT).show()
@@ -248,10 +234,11 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
         val deviceName = bluetoothService?.currentDeviceName ?: "Dispositivo"
         tvHeaderDeviceName.text = if (isConnected) deviceName else "Aguardando..."
         tvHeaderStatus.text = if (isConnected) "Conectado" else status
-        tvHeaderStatus.setTextColor(if (isConnected) colorSuccess else colorError)
+        // Aqui mantivemos uma corzinha básica (verde/vermelho) apenas para o header
+        // pois o usuário reclamou especificamente do container interno.
+        tvHeaderStatus.setTextColor(if (isConnected) Color.GREEN else Color.RED)
         progressBarMain.visibility = if (!isConnected && status.contains("Conectando")) View.VISIBLE else View.INVISIBLE
 
-        // Mostra o card de status apenas se estiver conectado no modo Phone
         if (isPhoneMode && isConnected) {
             cardWatchStatus.visibility = View.VISIBLE
         } else {
@@ -261,55 +248,36 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
         if (!isPhoneMode) {
             if (isConnected) {
                 tvWatchStatusBig.text = "Conectado"
-                tvWatchStatusBig.setTextColor(colorSuccess)
-                imgWatchStatus.setImageTintList(ColorStateList.valueOf(colorSuccess))
+                tvWatchStatusBig.setTextColor(Color.GREEN)
+                imgWatchStatus.setImageTintList(ColorStateList.valueOf(Color.GREEN))
             } else {
                 tvWatchStatusBig.text = "Desconectado"
-                tvWatchStatusBig.setTextColor(colorError)
-                imgWatchStatus.setImageTintList(ColorStateList.valueOf(colorError))
+                tvWatchStatusBig.setTextColor(Color.RED)
+                imgWatchStatus.setImageTintList(ColorStateList.valueOf(Color.RED))
             }
         }
     }
 
-    // Atualiza a UI específica do Card de Status
     private fun updateWatchStatusCard(battery: Int, isCharging: Boolean, wifi: String, dnd: Boolean) {
         // Bateria
         tvBatteryPercent.text = "$battery%"
         if (isCharging) {
-            imgBatteryIcon.setImageResource(android.R.drawable.ic_lock_idle_charging) // Ícone padrão de carga
-            imgBatteryIcon.setColorFilter(colorSuccess)
+            imgBatteryIcon.setImageResource(android.R.drawable.ic_lock_idle_charging)
         } else {
-            // Se tiver ic_battery_full no drawable use ele, senão usará um genérico
             imgBatteryIcon.setImageResource(R.drawable.ic_battery_full)
-            if (battery <= 20) imgBatteryIcon.setColorFilter(colorError)
-            else imgBatteryIcon.setColorFilter(colorTextPrimary)
         }
-
-        // Wifi
-        if (wifi.isNotEmpty()) {
-            tvWifiSsid.text = wifi
-            imgWifiIcon.setColorFilter(colorSuccess)
-        } else {
-            tvWifiSsid.text = "Desconectado"
-            imgWifiIcon.setColorFilter(colorTextSecondary)
-        }
-
-        // DND
+        tvWifiSsid.text = wifi.ifEmpty { "---" }
         updateDndUI(dnd)
     }
 
     private fun updateDndUI(enabled: Boolean) {
         currentDndState = enabled
+        layoutDndAction.alpha = 1.0f
+
         if (enabled) {
-            tvDndStatus.text = "DND On"
-            tvDndStatus.setTextColor(colorTextPrimary)
-            imgDndIcon.setColorFilter(colorTextPrimary)
-            layoutDndAction.alpha = 1.0f
+            tvDndStatus.text = "DND ON"
         } else {
-            tvDndStatus.text = "DND Off"
-            tvDndStatus.setTextColor(colorTextSecondary)
-            imgDndIcon.setColorFilter(colorTextSecondary)
-            layoutDndAction.alpha = 0.6f
+            tvDndStatus.text = "DND OFF"
         }
     }
 
@@ -375,8 +343,8 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
                 uploadTitleText?.text = "Envio concluído"
                 uploadDescriptionText?.text = "APK enviado com sucesso!"
                 uploadIconView?.setImageResource(android.R.drawable.stat_sys_upload_done)
-                uploadIconView?.setColorFilter(colorSuccess)
-                uploadPercentageText?.setTextColor(colorSuccess)
+                uploadIconView?.setColorFilter(Color.GREEN)
+                uploadPercentageText?.setTextColor(Color.GREEN)
                 uploadProgressBar?.visibility = View.GONE
                 uploadOkButton?.visibility = View.VISIBLE
             }
@@ -427,7 +395,6 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
     }
     override fun onAppListReceived(appsJson: String) {}
 
-    // Callback novo para atualização de status
     override fun onWatchStatusUpdated(batteryLevel: Int, isCharging: Boolean, wifiSsid: String, dndEnabled: Boolean) {
         runOnUiThread {
             updateWatchStatusCard(batteryLevel, isCharging, wifiSsid, dndEnabled)

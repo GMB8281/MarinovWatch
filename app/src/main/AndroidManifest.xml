@@ -9,7 +9,11 @@
     <!-- Bluetooth (Legado - Android 11 e inferior) -->
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
+
+    <!-- CORREÇÃO: Localização Precisa necessária para ler SSID do Wi-Fi em TODAS as versões -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <!-- Opcional: Localização em Background para Android 10+ (melhora leitura de Wi-Fi com tela desligada) -->
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
 
     <!-- Bluetooth (Moderno - Android 12+) -->
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
@@ -18,6 +22,7 @@
     <!-- Serviços e Sistema -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" /> <!-- Necessário para ler Wi-Fi no serviço -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
@@ -25,7 +30,6 @@
 
     <!-- Gerenciamento de Apps e Arquivos -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" tools:ignore="QueryAllPackagesPermission" />
-    <!-- CRÍTICO PARA ANDROID 8+ -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- NOVAS PERMISSÕES PARA STATUS -->
@@ -83,11 +87,12 @@
             android:theme="@style/Theme.Smartwatch" />
 
         <!-- Serviço Bluetooth -->
+        <!-- Adicionado "location" para permitir leitura de Wi-Fi em background -->
         <service
             android:name=".BluetoothService"
             android:enabled="true"
             android:exported="false"
-            android:foregroundServiceType="connectedDevice" />
+            android:foregroundServiceType="connectedDevice|location" />
 
         <!-- Listener de Notificações -->
         <service

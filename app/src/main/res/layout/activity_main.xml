@@ -97,11 +97,12 @@
                         android:layout_height="wrap_content"
                         android:text="Desconectado"
                         android:textAppearance="@style/TextAppearance.Material3.BodyMedium"
-                        android:textColor="?android:attr/colorError"/>
+                        android:textColor="?android:attr/textColorSecondary"/> <!-- Cor padrão para evitar erro -->
                 </LinearLayout>
             </LinearLayout>
 
-            <!-- NOVO CARD: STATUS DO WATCH (BATERIA, WIFI, DND) -->
+            <!-- STATUS DO WATCH: BATERIA, WIFI, DND -->
+            <!-- Layout Linear com pesos iguais para alinhamento perfeito -->
             <com.google.android.material.card.MaterialCardView
                 android:id="@+id/cardWatchStatus"
                 android:layout_width="match_parent"
@@ -121,7 +122,7 @@
                     android:padding="16dp"
                     android:baselineAligned="false">
 
-                    <!-- BATERIA -->
+                    <!-- BATERIA (Peso 1) -->
                     <LinearLayout
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
@@ -142,10 +143,11 @@
                             android:layout_height="wrap_content"
                             android:text="--%"
                             android:layout_marginTop="4dp"
-                            android:textAppearance="@style/TextAppearance.Material3.LabelMedium"/>
+                            android:textAppearance="@style/TextAppearance.Material3.LabelMedium"
+                            android:textColor="?android:attr/textColorPrimary"/>
                     </LinearLayout>
 
-                    <!-- WIFI -->
+                    <!-- WIFI (Peso 1) -->
                     <LinearLayout
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
@@ -164,21 +166,24 @@
                             android:id="@+id/tvWifiSsid"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:text="Desconectado"
+                            android:text="Verificando"
+                            android:gravity="center"
                             android:ellipsize="end"
                             android:maxLines="1"
                             android:layout_marginTop="4dp"
-                            android:textAppearance="@style/TextAppearance.Material3.LabelMedium"/>
+                            android:paddingHorizontal="2dp"
+                            android:textAppearance="@style/TextAppearance.Material3.LabelMedium"
+                            android:textColor="?android:attr/textColorPrimary"/>
                     </LinearLayout>
 
-                    <!-- NÃO PERTURBE (Clicável) -->
+                    <!-- NÃO PERTURBE (Peso 1) -->
                     <LinearLayout
                         android:id="@+id/layoutDndAction"
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
                         android:gravity="center"
-                        android:background="?attr/selectableItemBackground"
+                        android:background="?attr/selectableItemBackgroundBorderless"
                         android:clickable="true"
                         android:focusable="true"
                         android:orientation="vertical">
@@ -188,15 +193,16 @@
                             android:layout_width="24dp"
                             android:layout_height="24dp"
                             android:src="@drawable/ic_do_not_disturb"
-                            app:tint="?android:attr/textColorSecondary"/>
+                            app:tint="?android:attr/textColorPrimary"/> <!-- Tint fixo do tema -->
 
                         <TextView
                             android:id="@+id/tvDndStatus"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:text="DND Off"
+                            android:text="Normal"
                             android:layout_marginTop="4dp"
-                            android:textAppearance="@style/TextAppearance.Material3.LabelMedium"/>
+                            android:textAppearance="@style/TextAppearance.Material3.LabelMedium"
+                            android:textColor="?android:attr/textColorPrimary"/>
                     </LinearLayout>
 
                 </LinearLayout>

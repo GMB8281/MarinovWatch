@@ -1,5 +1,6 @@
 package com.marinov.watch
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
@@ -18,11 +19,13 @@ import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import android.net.Uri
+import android.net.wifi.SupplicantState
 import android.net.wifi.WifiManager
 import android.os.BatteryManager
 import android.os.Binder
@@ -31,7 +34,9 @@ import android.os.IBinder
 import android.provider.Settings
 import android.util.Base64
 import android.util.Log
+import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.core.content.edit
 import androidx.core.graphics.createBitmap
@@ -81,6 +86,9 @@ class BluetoothService : Service() {
     private lateinit var prefs: SharedPreferences
     private val PREF_NAME = "AppPrefs"
 
+    // Armazena o último SSID válido para quando a tela apagar e o Android retornar "unknown"
+    private var lastValidWifiSsid: String = ""
+
     @Volatile
     private var lastMessageTime: Long = 0L
 
@@ -106,9 +114,6 @@ class BluetoothService : Service() {
         fun onScanResult(devices: List<BluetoothDevice>)
         fun onAppListReceived(appsJson: String)
         fun onUploadProgress(progress: Int)
-
-        // CORREÇÃO: Adicionamos {} no final para tornar a implementação opcional
-        // Isso evita que o AppListActivity quebre
         fun onWatchStatusUpdated(batteryLevel: Int, isCharging: Boolean, wifiSsid: String, dndEnabled: Boolean) {}
     }
 
@@ -118,7 +123,7 @@ class BluetoothService : Service() {
     var currentDeviceName: String? = null
     var isConnected: Boolean = false
 
-    // Protocolo V2 (Chunk Based)
+    // Protocolo V2
     private val TYPE_TEXT_CMD = 1
     private val TYPE_NOTIFICATION_POSTED = 3
     private val TYPE_HEARTBEAT = 4
@@ -131,9 +136,8 @@ class BluetoothService : Service() {
 
     private val TYPE_SHUTDOWN_COMMAND = 10
 
-    // NOVOS TIPOS
-    private val TYPE_STATUS_UPDATE = 11 // Watch -> Phone (Bateria, Wifi, DND)
-    private val TYPE_SET_DND = 12       // Phone -> Watch (Ligar/Desligar DND)
+    private val TYPE_STATUS_UPDATE = 11
+    private val TYPE_SET_DND = 12
 
     private val CMD_REQUEST_APPS = "CMD_REQUEST_APPS"
     private val CMD_RESPONSE_APPS = "CMD_RESPONSE_APPS:"
@@ -227,7 +231,26 @@ class BluetoothService : Service() {
             updateStatus(currentStatus)
             return START_STICKY
         }
-        startForeground(NOTIFICATION_ID, createNotification("Aguardando conexão..."))
+
+        val notification = createNotification("Aguardando conexão...")
+
+        if (Build.VERSION.SDK_INT >= 34) {
+            val hasLocationPerm = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+            var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+            if (hasLocationPerm) {
+                type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+            }
+            startForeground(NOTIFICATION_ID, notification, type)
+        } else if (Build.VERSION.SDK_INT >= 29) {
+            var type = 0
+            if (Build.VERSION.SDK_INT >= 31) {
+                type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+            }
+            startForeground(NOTIFICATION_ID, notification, type)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+
         initializeLogicFromPrefs()
         return START_STICKY
     }
@@ -350,10 +373,8 @@ class BluetoothService : Service() {
         updateStatus("Conectado a $deviceName")
         withContext(Dispatchers.Main) { callback?.onDeviceConnected(deviceName) }
 
-        // Inicia loops paralelos
         serviceScope.launch { heartbeatLoop() }
 
-        // Se formos o Watch, iniciamos o envio periódico de status
         val deviceType = prefs.getString("device_type", "PHONE")
         if (deviceType == "WATCH") {
             startWatchStatusSender()
@@ -381,8 +402,6 @@ class BluetoothService : Service() {
                     }
                     TYPE_FILE_END -> handleFileEnd()
                     TYPE_SHUTDOWN_COMMAND -> handleShutdownCommand()
-
-                    // NOVOS HANDLERS
                     TYPE_STATUS_UPDATE -> handleStatusUpdateReceived(readString(inputStream))
                     TYPE_SET_DND -> handleSetDndCommand(readString(inputStream))
                 }
@@ -420,7 +439,7 @@ class BluetoothService : Service() {
 
     private fun forceDisconnect() {
         try { bluetoothSocket?.close() } catch (_: Exception) {}
-        statusUpdateJob?.cancel() // Para o envio de status
+        statusUpdateJob?.cancel()
     }
 
     private fun sendPacket(type: Int, data: ByteArray) {
@@ -441,10 +460,9 @@ class BluetoothService : Service() {
     }
 
     // ========================================================================
-    // NOVA LÓGICA: STATUS DO WATCH (BATERIA, WIFI, DND)
+    // STATUS DO WATCH (BATERIA, WIFI, DND)
     // ========================================================================
 
-    // Executado APENAS no Watch
     private fun startWatchStatusSender() {
         statusUpdateJob?.cancel()
         statusUpdateJob = serviceScope.launch(Dispatchers.IO) {
@@ -464,25 +482,62 @@ class BluetoothService : Service() {
     private fun collectWatchStatus(): JSONObject {
         val json = JSONObject()
 
-        // Bateria
+        // 1. Bateria
         val bm = getSystemService(BATTERY_SERVICE) as BatteryManager
         val batteryLevel = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
         val isCharging = bm.isCharging
 
-        // DND (Do Not Disturb)
+        // 2. DND
         val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         val dndEnabled = nm.currentInterruptionFilter != NotificationManager.INTERRUPTION_FILTER_ALL
 
-        // Wi-Fi
-        var wifiSsid = ""
+        // 3. Wi-Fi (Com Memória para Screen Off)
+        var wifiSsid = "Desconectado"
         try {
-            val wm = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
-            val info = wm.connectionInfo
-            if (info != null && info.networkId != -1) {
-                wifiSsid = info.ssid.replace("\"", "") // Remove aspas
-                if (wifiSsid == "<unknown ssid>") wifiSsid = ""
+            if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+                val wm = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
+
+                if (wm.isWifiEnabled) {
+                    val info = wm.connectionInfo
+
+                    // Se tivermos um objeto info e o estado for COMPLETED, estamos conectados.
+                    if (info != null && info.supplicantState == SupplicantState.COMPLETED) {
+                        val rawSsid = info.ssid
+
+                        // Se o Android esconder o SSID (tela apagada), usamos o último conhecido.
+                        if (rawSsid == "<unknown ssid>" || rawSsid.isEmpty()) {
+                            if (lastValidWifiSsid.isNotEmpty()) {
+                                wifiSsid = lastValidWifiSsid // Usa cache
+                            } else {
+                                wifiSsid = "Conectado" // Sem nome, mas conectado
+                            }
+                        } else {
+                            // Temos um nome válido! Salvamos e usamos.
+                            val cleanSsid = rawSsid.replace("\"", "")
+                            if (cleanSsid != "<unknown ssid>") {
+                                lastValidWifiSsid = cleanSsid
+                                wifiSsid = cleanSsid
+                            } else if (lastValidWifiSsid.isNotEmpty()) {
+                                wifiSsid = lastValidWifiSsid
+                            } else {
+                                wifiSsid = "Conectado"
+                            }
+                        }
+                    } else {
+                        // Se não estiver COMPLETED, resetamos o cache.
+                        lastValidWifiSsid = ""
+                        wifiSsid = "Desconectado"
+                    }
+                } else {
+                    lastValidWifiSsid = ""
+                    wifiSsid = "Wifi Off"
+                }
+            } else {
+                wifiSsid = "Sem Permissão"
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            wifiSsid = "Erro Wifi"
+        }
 
         json.put("battery", batteryLevel)
         json.put("charging", isCharging)
@@ -492,7 +547,6 @@ class BluetoothService : Service() {
         return json
     }
 
-    // Executado APENAS no Celular (Recebe os dados do Watch)
     private suspend fun handleStatusUpdateReceived(jsonString: String) {
         try {
             val json = JSONObject(jsonString)
@@ -509,12 +563,10 @@ class BluetoothService : Service() {
         }
     }
 
-    // Executado no Celular (Envia comando para mudar DND no Watch)
     fun sendDndCommand(enable: Boolean) {
         sendPacket(TYPE_SET_DND, enable.toString().toByteArray(Charsets.UTF_8))
     }
 
-    // Executado no Watch (Recebe comando e aplica)
     private fun handleSetDndCommand(command: String) {
         val enable = command.toBoolean()
         val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
@@ -524,17 +576,13 @@ class BluetoothService : Service() {
             } else {
                 nm.setInterruptionFilter(NotificationManager.INTERRUPTION_FILTER_ALL)
             }
-            // Força envio imediato do novo status
             serviceScope.launch {
+                delay(500)
                 val statusJson = collectWatchStatus()
                 sendPacket(TYPE_STATUS_UPDATE, statusJson.toString().toByteArray(Charsets.UTF_8))
             }
         }
     }
-
-    // ========================================================================
-    // LÓGICA DE RECEPÇÃO ARQUIVO (Mantida)
-    // ========================================================================
 
     private fun handleFileStart(expectedSize: Long) {
         try {
@@ -544,7 +592,6 @@ class BluetoothService : Service() {
                 receiveFile?.delete()
             }
             receiveFile?.createNewFile()
-
             receiveFileOutputStream = FileOutputStream(receiveFile)
             receiveTotalSize = expectedSize
             receiveBytesRead = 0
@@ -560,7 +607,6 @@ class BluetoothService : Service() {
                 receiveBytesRead += data.size
                 lastMessageTime = System.currentTimeMillis()
             } catch (_: Exception) {
-                // Erro silencioso
             }
         }
     }
@@ -570,12 +616,10 @@ class BluetoothService : Service() {
             receiveFileOutputStream?.flush()
             receiveFileOutputStream?.close()
             receiveFileOutputStream = null
-
             if (receiveFile != null && receiveFile!!.exists()) {
                 CoroutineScope(Dispatchers.Main).launch {
                     try {
-                        // Verifica permissão ANTES de tentar mostrar notificação de instalação
-                        if (!packageManager.canRequestPackageInstalls()) {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
                             showPermissionNotification()
                             return@launch
                         }
@@ -586,13 +630,8 @@ class BluetoothService : Service() {
                 }
             }
         } catch (_: Exception) {
-            // Erro
         }
     }
-
-    // ========================================================================
-    // SHUTDOWN COMMAND (Mantido)
-    // ========================================================================
 
     private fun handleShutdownCommand() {
         Log.i("BluetoothService", "Comando de shutdown recebido")
@@ -610,48 +649,36 @@ class BluetoothService : Service() {
         sendPacket(TYPE_SHUTDOWN_COMMAND, ByteArray(0))
     }
 
-    // ========================================================================
-    // LÓGICA DE ENVIO APK (Mantido)
-    // ========================================================================
-
     fun sendApkFile(uri: Uri) {
         serviceScope.launch(Dispatchers.IO) {
             if (!isConnected) {
                 withContext(Dispatchers.Main) { callback?.onError("Não conectado.") }
                 return@launch
             }
-
             val out = globalOutputStream ?: return@launch
             isTransferring = true
-
             try {
                 val contentResolver = contentResolver
                 val fileSize = contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize } ?: -1L
-
                 contentResolver.openInputStream(uri)?.use { fileIS ->
                     withContext(Dispatchers.Main) { callback?.onUploadProgress(0) }
-
                     synchronized(out) {
                         out.writeByte(TYPE_FILE_START)
                         out.writeLong(fileSize)
                         out.flush()
                     }
-
                     val buffer = ByteArray(8192)
                     var totalSent = 0L
                     var bytesRead: Int
                     var lastUpdate = 0L
-
                     while (fileIS.read(buffer).also { bytesRead = it } != -1) {
                         synchronized(out) {
                             out.writeByte(TYPE_FILE_CHUNK)
                             out.writeInt(bytesRead)
                             out.write(buffer, 0, bytesRead)
                         }
-
                         lastMessageTime = System.currentTimeMillis()
                         totalSent += bytesRead
-
                         val now = System.currentTimeMillis()
                         if (now - lastUpdate > 300) {
                             val progress = if (fileSize > 0) ((totalSent * 100) / fileSize).toInt() else 0
@@ -659,12 +686,10 @@ class BluetoothService : Service() {
                             lastUpdate = now
                         }
                     }
-
                     synchronized(out) {
                         out.writeByte(TYPE_FILE_END)
                         out.flush()
                     }
-
                     withContext(Dispatchers.Main) { callback?.onUploadProgress(100) }
                 }
             } catch (e: Exception) {
@@ -682,18 +707,15 @@ class BluetoothService : Service() {
     private fun showInstallNotification(tempFile: File) {
         val authority = "${packageName}.fileprovider"
         val installUri = FileProvider.getUriForFile(this, authority, tempFile)
-
         val installIntent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(installUri, "application/vnd.android.package-archive")
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
-
         val pendingIntent = PendingIntent.getActivity(
             this, 0, installIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-
         val builder = NotificationCompat.Builder(this, INSTALL_CHANNEL_ID)
             .setContentTitle("APK Recebido")
             .setContentText("Toque para instalar")
@@ -701,7 +723,6 @@ class BluetoothService : Service() {
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setAutoCancel(true)
             .setContentIntent(pendingIntent)
-
         val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         manager.notify(INSTALL_NOTIFICATION_ID, builder.build())
     }
@@ -711,12 +732,10 @@ class BluetoothService : Service() {
             data = "package:$packageName".toUri()
             flags = Intent.FLAG_ACTIVITY_NEW_TASK
         }
-
         val pendingIntent = PendingIntent.getActivity(
             this, 0, intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-
         val builder = NotificationCompat.Builder(this, INSTALL_CHANNEL_ID)
             .setContentTitle("Configuração Necessária")
             .setContentText("Toque para permitir instalação")
@@ -724,7 +743,6 @@ class BluetoothService : Service() {
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setAutoCancel(true)
             .setContentIntent(pendingIntent)
-
         val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         manager.notify(INSTALL_NOTIFICATION_ID, builder.build())
     }
@@ -736,7 +754,6 @@ class BluetoothService : Service() {
             .setSmallIcon(android.R.drawable.stat_notify_error)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setAutoCancel(true)
-
         val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         manager.notify(999, builder.build())
     }
