@@ -23,6 +23,8 @@ import android.graphics.Canvas
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import android.net.Uri
+import android.net.wifi.WifiManager
+import android.os.BatteryManager
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
@@ -31,6 +33,10 @@ import android.util.Base64
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.FileProvider
+import androidx.core.content.edit
+import androidx.core.graphics.createBitmap
+import androidx.core.graphics.scale
+import androidx.core.net.toUri
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -55,10 +61,6 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
-import androidx.core.net.toUri
-import androidx.core.graphics.createBitmap
-import androidx.core.graphics.scale
-import androidx.core.content.edit
 
 class BluetoothService : Service() {
 
@@ -67,6 +69,7 @@ class BluetoothService : Service() {
 
     private var connectionJob: Job? = null
     private var serverJob: Job? = null
+    private var statusUpdateJob: Job? = null
 
     private var bluetoothAdapter: BluetoothAdapter? = null
     private var bluetoothSocket: BluetoothSocket? = null
@@ -103,6 +106,10 @@ class BluetoothService : Service() {
         fun onScanResult(devices: List<BluetoothDevice>)
         fun onAppListReceived(appsJson: String)
         fun onUploadProgress(progress: Int)
+
+        // CORREÇÃO: Adicionamos {} no final para tornar a implementação opcional
+        // Isso evita que o AppListActivity quebre
+        fun onWatchStatusUpdated(batteryLevel: Int, isCharging: Boolean, wifiSsid: String, dndEnabled: Boolean) {}
     }
 
     var callback: ServiceCallback? = null
@@ -122,8 +129,11 @@ class BluetoothService : Service() {
     private val TYPE_FILE_CHUNK = 8
     private val TYPE_FILE_END = 9
 
-    // NOVO: Comando de Shutdown
     private val TYPE_SHUTDOWN_COMMAND = 10
+
+    // NOVOS TIPOS
+    private val TYPE_STATUS_UPDATE = 11 // Watch -> Phone (Bateria, Wifi, DND)
+    private val TYPE_SET_DND = 12       // Phone -> Watch (Ligar/Desligar DND)
 
     private val CMD_REQUEST_APPS = "CMD_REQUEST_APPS"
     private val CMD_RESPONSE_APPS = "CMD_RESPONSE_APPS:"
@@ -339,7 +349,15 @@ class BluetoothService : Service() {
         currentDeviceName = deviceName
         updateStatus("Conectado a $deviceName")
         withContext(Dispatchers.Main) { callback?.onDeviceConnected(deviceName) }
+
+        // Inicia loops paralelos
         serviceScope.launch { heartbeatLoop() }
+
+        // Se formos o Watch, iniciamos o envio periódico de status
+        val deviceType = prefs.getString("device_type", "PHONE")
+        if (deviceType == "WATCH") {
+            startWatchStatusSender()
+        }
 
         try {
             while (currentCoroutineContext().isActive) {
@@ -363,6 +381,10 @@ class BluetoothService : Service() {
                     }
                     TYPE_FILE_END -> handleFileEnd()
                     TYPE_SHUTDOWN_COMMAND -> handleShutdownCommand()
+
+                    // NOVOS HANDLERS
+                    TYPE_STATUS_UPDATE -> handleStatusUpdateReceived(readString(inputStream))
+                    TYPE_SET_DND -> handleSetDndCommand(readString(inputStream))
                 }
             }
         } catch (_: IOException) {
@@ -398,6 +420,7 @@ class BluetoothService : Service() {
 
     private fun forceDisconnect() {
         try { bluetoothSocket?.close() } catch (_: Exception) {}
+        statusUpdateJob?.cancel() // Para o envio de status
     }
 
     private fun sendPacket(type: Int, data: ByteArray) {
@@ -418,7 +441,99 @@ class BluetoothService : Service() {
     }
 
     // ========================================================================
-    // LÓGICA DE RECEPÇÃO (BLINDADA)
+    // NOVA LÓGICA: STATUS DO WATCH (BATERIA, WIFI, DND)
+    // ========================================================================
+
+    // Executado APENAS no Watch
+    private fun startWatchStatusSender() {
+        statusUpdateJob?.cancel()
+        statusUpdateJob = serviceScope.launch(Dispatchers.IO) {
+            while (isActive && isConnected) {
+                try {
+                    val statusJson = collectWatchStatus()
+                    sendPacket(TYPE_STATUS_UPDATE, statusJson.toString().toByteArray(Charsets.UTF_8))
+                } catch (e: Exception) {
+                    Log.e("BluetoothService", "Erro ao enviar status: ${e.message}")
+                }
+                delay(5000) // Envia a cada 5 segundos
+            }
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun collectWatchStatus(): JSONObject {
+        val json = JSONObject()
+
+        // Bateria
+        val bm = getSystemService(BATTERY_SERVICE) as BatteryManager
+        val batteryLevel = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+        val isCharging = bm.isCharging
+
+        // DND (Do Not Disturb)
+        val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        val dndEnabled = nm.currentInterruptionFilter != NotificationManager.INTERRUPTION_FILTER_ALL
+
+        // Wi-Fi
+        var wifiSsid = ""
+        try {
+            val wm = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
+            val info = wm.connectionInfo
+            if (info != null && info.networkId != -1) {
+                wifiSsid = info.ssid.replace("\"", "") // Remove aspas
+                if (wifiSsid == "<unknown ssid>") wifiSsid = ""
+            }
+        } catch (_: Exception) {}
+
+        json.put("battery", batteryLevel)
+        json.put("charging", isCharging)
+        json.put("dnd", dndEnabled)
+        json.put("wifi", wifiSsid)
+
+        return json
+    }
+
+    // Executado APENAS no Celular (Recebe os dados do Watch)
+    private suspend fun handleStatusUpdateReceived(jsonString: String) {
+        try {
+            val json = JSONObject(jsonString)
+            val battery = json.optInt("battery", 0)
+            val charging = json.optBoolean("charging", false)
+            val dnd = json.optBoolean("dnd", false)
+            val wifi = json.optString("wifi", "")
+
+            withContext(Dispatchers.Main) {
+                callback?.onWatchStatusUpdated(battery, charging, wifi, dnd)
+            }
+        } catch (e: Exception) {
+            Log.e("BluetoothService", "Erro parser status: ${e.message}")
+        }
+    }
+
+    // Executado no Celular (Envia comando para mudar DND no Watch)
+    fun sendDndCommand(enable: Boolean) {
+        sendPacket(TYPE_SET_DND, enable.toString().toByteArray(Charsets.UTF_8))
+    }
+
+    // Executado no Watch (Recebe comando e aplica)
+    private fun handleSetDndCommand(command: String) {
+        val enable = command.toBoolean()
+        val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        if (nm.isNotificationPolicyAccessGranted) {
+            if (enable) {
+                nm.setInterruptionFilter(NotificationManager.INTERRUPTION_FILTER_PRIORITY)
+            } else {
+                nm.setInterruptionFilter(NotificationManager.INTERRUPTION_FILTER_ALL)
+            }
+            // Força envio imediato do novo status
+            serviceScope.launch {
+                val statusJson = collectWatchStatus()
+                sendPacket(TYPE_STATUS_UPDATE, statusJson.toString().toByteArray(Charsets.UTF_8))
+            }
+        }
+    }
+
+    // ========================================================================
+    // LÓGICA DE RECEPÇÃO ARQUIVO (Mantida)
     // ========================================================================
 
     private fun handleFileStart(expectedSize: Long) {
@@ -476,44 +591,27 @@ class BluetoothService : Service() {
     }
 
     // ========================================================================
-    // NOVA FUNÇÃO: SHUTDOWN DO SMARTWATCH
+    // SHUTDOWN COMMAND (Mantido)
     // ========================================================================
 
     private fun handleShutdownCommand() {
         Log.i("BluetoothService", "Comando de shutdown recebido")
-
-        // Executa em background para não bloquear o bluetooth
         serviceScope.launch(Dispatchers.IO) {
             try {
-                // Tenta executar o comando de shutdown com root
                 val process = Runtime.getRuntime().exec(arrayOf("su", "-c", "reboot -p"))
-
-                // Aguarda até 3 segundos pela execução
-                withTimeout(3000) {
-                    process.waitFor()
-                }
-
-                Log.i("BluetoothService", "Comando shutdown executado")
-            } catch (e: Exception) {
-                Log.e("BluetoothService", "Erro ao executar shutdown: ${e.message}")
-
-                // Fallback: tenta sem -p (alguns devices não suportam)
-                try {
-                    Runtime.getRuntime().exec(arrayOf("su", "-c", "reboot"))
-                } catch (ex: Exception) {
-                    Log.e("BluetoothService", "Erro no fallback shutdown: ${ex.message}")
-                }
+                withTimeout(3000) { process.waitFor() }
+            } catch (_: Exception) {
+                try { Runtime.getRuntime().exec(arrayOf("su", "-c", "reboot")) } catch (_: Exception) {}
             }
         }
     }
 
-    // Função pública para enviar comando de shutdown (chamada do smartphone)
     fun sendShutdownCommand() {
         sendPacket(TYPE_SHUTDOWN_COMMAND, ByteArray(0))
     }
 
     // ========================================================================
-    // LÓGICA DE ENVIO
+    // LÓGICA DE ENVIO APK (Mantido)
     // ========================================================================
 
     fun sendApkFile(uri: Uri) {
@@ -608,7 +706,6 @@ class BluetoothService : Service() {
         manager.notify(INSTALL_NOTIFICATION_ID, builder.build())
     }
 
-    // Notificação especial para pedir permissão no Watch
     private fun showPermissionNotification() {
         val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
             data = "package:$packageName".toUri()
@@ -643,8 +740,6 @@ class BluetoothService : Service() {
         val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         manager.notify(999, builder.build())
     }
-
-    // --- Demais Funções Auxiliares ---
 
     private fun handleTextMessage(message: String) {
         if (message == CMD_REQUEST_APPS) {
@@ -744,6 +839,7 @@ class BluetoothService : Service() {
     fun stopConnectionLoopOnly() {
         connectionJob?.cancel()
         serverJob?.cancel()
+        statusUpdateJob?.cancel()
         forceDisconnect()
         bluetoothSocket = null
         updateStatus("Parado.")

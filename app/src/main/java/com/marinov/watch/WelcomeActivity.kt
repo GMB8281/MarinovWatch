@@ -2,6 +2,7 @@ package com.marinov.watch
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.NotificationManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
@@ -23,12 +24,17 @@ class WelcomeActivity : AppCompatActivity() {
 
     private val requestPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-            // Independente do resultado, prosseguimos (o app trata falta de permissão depois se precisar)
+            // Independente do resultado, prosseguimos
         }
 
     private val installPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-            // Após o usuário interagir com a tela de permissão, finalizamos o setup
+            checkDndPermissionAndFinish()
+        }
+
+    // Launcher para permissão de DND (Não Perturbe)
+    private val dndPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
             finishSetup("WATCH")
         }
 
@@ -37,7 +43,6 @@ class WelcomeActivity : AppCompatActivity() {
         setContentView(R.layout.activity_welcome)
 
         checkBatteryOptimizationDirect()
-        // Pede permissões básicas logo de cara para evitar fluxos complexos depois
         checkAndRequestPermissions()
 
         val cardSmartphone = findViewById<MaterialCardView>(R.id.cardSmartphone)
@@ -50,6 +55,18 @@ class WelcomeActivity : AppCompatActivity() {
         }
     }
 
+    // 2. Faz a verificação de Root e DEPOIS chama a permissão de instalação.
+    private fun checkRootAndSetup() {
+        lifecycleScope.launch(Dispatchers.IO) {
+            checkRootAccess() // Essa chamada dispara o prompt de root
+
+            withContext(Dispatchers.Main) {
+                // Após o prompt de root ser tratado, pedimos a permissão de instalação
+                requestInstallPermission()
+            }
+        }
+    }
+
     // 3. Chamado após a verificação de root.
     private fun requestInstallPermission() {
         if (!packageManager.canRequestPackageInstalls()) {
@@ -57,20 +74,18 @@ class WelcomeActivity : AppCompatActivity() {
             intent.data = "package:$packageName".toUri()
             installPermissionLauncher.launch(intent)
         } else {
-            // Se a permissão já existe ou a versão do Android é antiga, finaliza
-            finishSetup("WATCH")
+            checkDndPermissionAndFinish()
         }
     }
 
-    // 2. Faz a verificação de Root e DEPOIS chama a permissão de instalação.
-    private fun checkRootAndSetup() {
-        lifecycleScope.launch(Dispatchers.IO) {
-            checkRootAccess() // Essa chamada dispara o prompt de root
-
-            withContext(Dispatchers.Main) {
-                // Após o prompt de root ser tratado (concedido ou negado), pedimos a outra permissão
-                requestInstallPermission()
-            }
+    // 4. Nova verificação para Não Perturbe (DND)
+    private fun checkDndPermissionAndFinish() {
+        val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        if (!notificationManager.isNotificationPolicyAccessGranted) {
+            val intent = Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)
+            dndPermissionLauncher.launch(intent)
+        } else {
+            finishSetup("WATCH")
         }
     }
 
@@ -86,7 +101,7 @@ class WelcomeActivity : AppCompatActivity() {
         }
     }
 
-    // 4. Apenas finaliza o processo
+    // 5. Finaliza o processo
     private fun finishSetup(type: String) {
         val prefs = getSharedPreferences("AppPrefs", MODE_PRIVATE)
         prefs.edit { putString("device_type", type) }
@@ -103,6 +118,12 @@ class WelcomeActivity : AppCompatActivity() {
         } else {
             permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
         }
+
+        // Permissão necessária para ler SSID do Wi-Fi em versões mais antigas
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            permissions.add(Manifest.permission.ACCESS_COARSE_LOCATION)
+        }
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             permissions.add(Manifest.permission.POST_NOTIFICATIONS)
         }
