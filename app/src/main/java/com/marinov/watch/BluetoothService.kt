@@ -253,8 +253,8 @@ class BluetoothService : Service() {
             return START_NOT_STICKY
         }
 
-        // Inicia o foreground service com notificação baseada no estado atual
-        startForegroundWithCurrentState()
+        // Inicia ou atualiza o foreground service com a notificação correta
+        updateForegroundNotification()
 
         // Inicializa lógica se não estiver conectado
         if (!isConnected) {
@@ -264,34 +264,6 @@ class BluetoothService : Service() {
         if (DEBUG_NOTIFICATIONS) Log.d(TAG, "onStartCommand: Service started, isConnected=$isConnected")
 
         return START_STICKY
-    }
-
-    private fun startForegroundWithCurrentState() {
-        val notification = buildNotificationForCurrentState()
-
-        if (Build.VERSION.SDK_INT >= 34) {
-            val hasLocationPerm = ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.ACCESS_FINE_LOCATION
-            ) == PackageManager.PERMISSION_GRANTED
-            var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
-            if (hasLocationPerm) {
-                type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
-            }
-            startForeground(NOTIFICATION_ID, notification, type)
-        } else if (Build.VERSION.SDK_INT >= 29) {
-            var type = 0
-            if (Build.VERSION.SDK_INT >= 31) {
-                type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
-            }
-            startForeground(NOTIFICATION_ID, notification, type)
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
-        }
-
-        if (DEBUG_NOTIFICATIONS) {
-            Log.d(TAG, "startForegroundWithCurrentState: Started with status='$currentNotificationStatus', isConnected=$isConnected")
-        }
     }
 
     private fun initializeLogicFromPrefs() {
@@ -936,33 +908,22 @@ class BluetoothService : Service() {
     // ========================================================================
 
     /**
-     * Atualiza o status do serviço e força a atualização imediata da notificação
-     * Esta função é thread-safe e funciona mesmo quando o app está em background
+     * Atualiza o status do serviço, gerenciando a notificação de foreground de forma atômica.
+     * Esta função é thread-safe e funciona mesmo quando o app está em background.
      */
     private fun updateStatus(text: String) {
-        // Atualiza variáveis de estado
         currentStatus = text
         currentNotificationStatus = text
 
         val updateId = notificationUpdateCounter.incrementAndGet()
-
         if (DEBUG_NOTIFICATIONS) {
-            Log.d(TAG, "updateStatus #$updateId: text='$text', isConnected=$isConnected, deviceName=$currentDeviceName")
+            Log.d(TAG, "updateStatus #$updateId: text='$text', isConnected=$isConnected")
         }
 
-        // ESTRATÉGIA 1: Atualização imediata no thread atual (mais rápida)
-        try {
-            updateNotificationDirect()
-        } catch (e: Exception) {
-            if (DEBUG_NOTIFICATIONS) {
-                Log.e(TAG, "updateStatus #$updateId: Falha na atualização direta: ${e.message}")
-            }
-        }
-
-        // ESTRATÉGIA 2: Backup via Main Handler (garante execução)
+        // Garante que a atualização da notificação ocorra no thread principal.
         mainHandler.post {
             try {
-                updateNotificationDirect()
+                updateForegroundNotification()
                 if (DEBUG_NOTIFICATIONS) {
                     Log.d(TAG, "updateStatus #$updateId: Atualização via Handler concluída")
                 }
@@ -971,41 +932,62 @@ class BluetoothService : Service() {
                     Log.e(TAG, "updateStatus #$updateId: Falha na atualização via Handler: ${e.message}")
                 }
             }
-        }
-
-        // ESTRATÉGIA 3: Notifica callback (apenas para UI)
-        mainHandler.post {
+            // Notifica a UI
             callback?.onStatusChanged(text)
         }
     }
 
     /**
-     * Atualiza a notificação diretamente, sem coroutines
-     * Pode ser chamada de qualquer thread
+     * ÚNICA FONTE DA VERDADE para gerenciar a notificação de foreground.
+     * Garante que a notificação anterior seja limpa antes de exibir a nova.
      */
-    private fun updateNotificationDirect() {
+    private fun updateForegroundNotification() {
         try {
-            // 1 & 2. Sempre cancela a notificação anterior para garantir um estado limpo.
-            notificationManager.cancel(NOTIFICATION_ID)
+            // 1. Remove a notificação anterior e desvincula o serviço do estado de foreground.
+            // O serviço continua rodando, mas está pronto para ser promovido novamente.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_DETACH)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(false)
+            }
+            notificationManager.cancel(NOTIFICATION_ID) // Garante a remoção
 
-            // Prepara a nova notificação
+            // 2. Prepara a nova notificação com base no estado atual.
             val notification = buildNotificationForCurrentState()
             val channelId = notification.channelId
             val channel = notificationManager.getNotificationChannel(channelId)
 
             // 3. Verifica se o novo canal de notificação está habilitado pelo usuário.
             if (channel != null && channel.importance != NotificationManager.IMPORTANCE_NONE) {
-                // 4. Se o canal estiver habilitado, exibe a nova notificação.
-                notificationManager.notify(NOTIFICATION_ID, notification)
+                // 4. Se o canal estiver habilitado, promove o serviço para foreground novamente
+                // com a nova notificação.
+                if (Build.VERSION.SDK_INT >= 34) {
+                    val hasLocationPerm = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+                    var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+                    if (hasLocationPerm) {
+                        type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+                    }
+                    startForeground(NOTIFICATION_ID, notification, type)
+                } else if (Build.VERSION.SDK_INT >= 29) {
+                    var type = 0
+                    if (Build.VERSION.SDK_INT >= 31) {
+                        type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+                    }
+                    startForeground(NOTIFICATION_ID, notification, type)
+                } else {
+                    startForeground(NOTIFICATION_ID, notification)
+                }
             }
-            // Se o canal estiver desabilitado, a notificação antiga já foi cancelada e nenhuma nova será mostrada.
+            // Se o canal estiver desabilitado, o serviço simplesmente continua em background
+            // (não-foreground) sem notificação, até o próximo updateStatus.
         } catch (e: Exception) {
             if (DEBUG_NOTIFICATIONS) {
-                Log.e(TAG, "updateNotificationDirect: Erro ao atualizar notificação: ${e.message}", e)
+                Log.e(TAG, "updateForegroundNotification: Erro: ${e.message}", e)
             }
-            // A exceção é capturada para evitar que o serviço quebre.
         }
     }
+
 
     private fun buildNotificationForCurrentState(): Notification {
         val intent = Intent(this, MainActivity::class.java)
