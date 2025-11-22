@@ -31,6 +31,8 @@ import android.os.BatteryManager
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.util.Base64
 import android.util.Log
@@ -66,6 +68,7 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 class BluetoothService : Service() {
 
@@ -105,9 +108,17 @@ class BluetoothService : Service() {
 
     private val notificationMap = ConcurrentHashMap<String, Int>()
 
-    // REFATORAÇÃO: Armazena o último status da notificação
+    // REFATORAÇÃO: Controle mais robusto de notificações
     @Volatile
     private var currentNotificationStatus: String = ""
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val notificationUpdateCounter = AtomicLong(0)
+
+    // Cache do NotificationManager para evitar múltiplas chamadas getSystemService
+    private val notificationManager: NotificationManager by lazy {
+        getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+    }
 
     interface ServiceCallback {
         fun onStatusChanged(status: String)
@@ -170,6 +181,9 @@ class BluetoothService : Service() {
         const val MIRRORED_CHANNEL_ID = "mirrored_notifications"
 
         const val ACTION_STOP_SERVICE = "ACTION_STOP_SERVICE"
+
+        private const val TAG = "BluetoothService"
+        private const val DEBUG_NOTIFICATIONS = false // Ative para debug
     }
 
     private val internalReceiver = object : BroadcastReceiver() {
@@ -229,9 +243,10 @@ class BluetoothService : Service() {
             registerReceiver(internalReceiver, filterInternal)
             registerReceiver(watchDismissReceiver, filterWatch)
         }
+
+        if (DEBUG_NOTIFICATIONS) Log.d(TAG, "onCreate: Service created")
     }
 
-    // REFATORAÇÃO: onStartCommand simplificado e mais robusto
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP_SERVICE) {
             stopSelf()
@@ -246,10 +261,11 @@ class BluetoothService : Service() {
             initializeLogicFromPrefs()
         }
 
+        if (DEBUG_NOTIFICATIONS) Log.d(TAG, "onStartCommand: Service started, isConnected=$isConnected")
+
         return START_STICKY
     }
 
-    // REFATORAÇÃO: Nova função para iniciar foreground service
     private fun startForegroundWithCurrentState() {
         val notification = buildNotificationForCurrentState()
 
@@ -271,6 +287,10 @@ class BluetoothService : Service() {
             startForeground(NOTIFICATION_ID, notification, type)
         } else {
             startForeground(NOTIFICATION_ID, notification)
+        }
+
+        if (DEBUG_NOTIFICATIONS) {
+            Log.d(TAG, "startForegroundWithCurrentState: Started with status='$currentNotificationStatus', isConnected=$isConnected")
         }
     }
 
@@ -394,7 +414,6 @@ class BluetoothService : Service() {
         }
     }
 
-    // REFATORAÇÃO: handleConnectedSocket com gestão melhorada de estado
     private suspend fun handleConnectedSocket(socket: BluetoothSocket, deviceName: String) {
         this.bluetoothSocket = socket
         globalOutputStream = DataOutputStream(socket.outputStream)
@@ -450,14 +469,12 @@ class BluetoothService : Service() {
         } catch (_: IOException) {
             // Conexão perdida
         } finally {
-            // REFATORAÇÃO: Garante atualização completa do estado
             val wasConnected = isConnected
 
             forceDisconnect()
             isConnected = false
             currentDeviceName = null
 
-            // Atualiza status apenas se estava realmente conectado
             if (wasConnected) {
                 updateStatus("Desconectado")
             }
@@ -490,7 +507,6 @@ class BluetoothService : Service() {
         }
     }
 
-    // REFATORAÇÃO: forceDisconnect com atualização de estado
     private fun forceDisconnect() {
         try {
             bluetoothSocket?.close()
@@ -528,7 +544,7 @@ class BluetoothService : Service() {
                     val statusJson = collectWatchStatus()
                     sendPacket(TYPE_STATUS_UPDATE, statusJson.toString().toByteArray(Charsets.UTF_8))
                 } catch (e: Exception) {
-                    Log.e("BluetoothService", "Erro ao enviar status: ${e.message}")
+                    Log.e(TAG, "Erro ao enviar status: ${e.message}")
                 }
                 delay(5000)
             }
@@ -607,7 +623,7 @@ class BluetoothService : Service() {
                 callback?.onWatchStatusUpdated(battery, charging, wifi, dnd)
             }
         } catch (e: Exception) {
-            Log.e("BluetoothService", "Erro parser status: ${e.message}")
+            Log.e(TAG, "Erro parser status: ${e.message}")
         }
     }
 
@@ -682,7 +698,7 @@ class BluetoothService : Service() {
     }
 
     private fun handleShutdownCommand() {
-        Log.i("BluetoothService", "Comando de shutdown recebido")
+        Log.i(TAG, "Comando de shutdown recebido")
         serviceScope.launch(Dispatchers.IO) {
             try {
                 val process = Runtime.getRuntime().exec(arrayOf("su", "-c", "reboot -p"))
@@ -771,8 +787,7 @@ class BluetoothService : Service() {
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setAutoCancel(true)
             .setContentIntent(pendingIntent)
-        val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-        manager.notify(INSTALL_NOTIFICATION_ID, builder.build())
+        notificationManager.notify(INSTALL_NOTIFICATION_ID, builder.build())
     }
 
     private fun showPermissionNotification() {
@@ -791,8 +806,7 @@ class BluetoothService : Service() {
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setAutoCancel(true)
             .setContentIntent(pendingIntent)
-        val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-        manager.notify(INSTALL_NOTIFICATION_ID, builder.build())
+        notificationManager.notify(INSTALL_NOTIFICATION_ID, builder.build())
     }
 
     private fun showErrorNotification(msg: String) {
@@ -802,8 +816,7 @@ class BluetoothService : Service() {
             .setSmallIcon(android.R.drawable.stat_notify_error)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setAutoCancel(true)
-        val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-        manager.notify(999, builder.build())
+        notificationManager.notify(999, builder.build())
     }
 
     private fun handleTextMessage(message: String) {
@@ -876,13 +889,13 @@ class BluetoothService : Service() {
                 .setDeleteIntent(deletePending)
                 .build()
 
-            (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).notify(notifId, notification)
+            notificationManager.notify(notifId, notification)
         } catch (_: Exception) {}
     }
 
     private fun dismissLocalNotification(key: String) {
         notificationMap[key]?.let { id ->
-            (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).cancel(id)
+            notificationManager.cancel(id)
             notificationMap.remove(key)
         }
     }
@@ -901,7 +914,6 @@ class BluetoothService : Service() {
         stopSelf()
     }
 
-    // REFATORAÇÃO: stopConnectionLoopOnly com gestão melhorada de estado
     fun stopConnectionLoopOnly() {
         connectionJob?.cancel()
         serverJob?.cancel()
@@ -914,29 +926,75 @@ class BluetoothService : Service() {
         currentDeviceName = null
         bluetoothSocket = null
 
-        // Atualiza status apenas se necessário
         if (wasConnected || currentNotificationStatus != "Parado.") {
             updateStatus("Parado.")
         }
     }
 
-    // REFATORAÇÃO: updateStatus completamente redesenhado
+    // ========================================================================
+    // REFATORAÇÃO CRÍTICA: SISTEMA DE ATUALIZAÇÃO DE NOTIFICAÇÕES
+    // ========================================================================
+
+    /**
+     * Atualiza o status do serviço e força a atualização imediata da notificação
+     * Esta função é thread-safe e funciona mesmo quando o app está em background
+     */
     private fun updateStatus(text: String) {
-        CoroutineScope(Dispatchers.Main).launch {
-            currentStatus = text
-            currentNotificationStatus = text
+        // Atualiza variáveis de estado
+        currentStatus = text
+        currentNotificationStatus = text
 
-            // Atualiza a notificação com o estado atual
-            val notification = buildNotificationForCurrentState()
-            val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-            manager.notify(NOTIFICATION_ID, notification)
+        val updateId = notificationUpdateCounter.incrementAndGet()
 
-            // Notifica callback
+        if (DEBUG_NOTIFICATIONS) {
+            Log.d(TAG, "updateStatus #$updateId: text='$text', isConnected=$isConnected, deviceName=$currentDeviceName")
+        }
+
+        // ESTRATÉGIA 1: Atualização imediata no thread atual (mais rápida)
+        try {
+            updateNotificationDirect()
+        } catch (e: Exception) {
+            if (DEBUG_NOTIFICATIONS) {
+                Log.e(TAG, "updateStatus #$updateId: Falha na atualização direta: ${e.message}")
+            }
+        }
+
+        // ESTRATÉGIA 2: Backup via Main Handler (garante execução)
+        mainHandler.post {
+            try {
+                updateNotificationDirect()
+                if (DEBUG_NOTIFICATIONS) {
+                    Log.d(TAG, "updateStatus #$updateId: Atualização via Handler concluída")
+                }
+            } catch (e: Exception) {
+                if (DEBUG_NOTIFICATIONS) {
+                    Log.e(TAG, "updateStatus #$updateId: Falha na atualização via Handler: ${e.message}")
+                }
+            }
+        }
+
+        // ESTRATÉGIA 3: Notifica callback (apenas para UI)
+        mainHandler.post {
             callback?.onStatusChanged(text)
         }
     }
 
-    // REFATORAÇÃO: Nova função para construir notificação baseada no estado real
+    /**
+     * Atualiza a notificação diretamente, sem coroutines
+     * Pode ser chamada de qualquer thread
+     */
+    private fun updateNotificationDirect() {
+        try {
+            val notification = buildNotificationForCurrentState()
+            notificationManager.notify(NOTIFICATION_ID, notification)
+        } catch (e: Exception) {
+            if (DEBUG_NOTIFICATIONS) {
+                Log.e(TAG, "updateNotificationDirect: Erro ao atualizar notificação: ${e.message}", e)
+            }
+            throw e
+        }
+    }
+
     private fun buildNotificationForCurrentState(): Notification {
         val intent = Intent(this, MainActivity::class.java)
         val pending = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE)
@@ -954,24 +1012,19 @@ class BluetoothService : Service() {
             .build()
     }
 
-    // REFATORAÇÃO: Determina o canal correto baseado APENAS no estado real
     private fun determineNotificationChannel(): String {
         return when {
-            // CONECTADO: isConnected é verdadeiro
             isConnected -> CHANNEL_ID_CONNECTED
 
-            // AGUARDANDO: Estados de espera ou início
             currentNotificationStatus.contains("Aguardando", ignoreCase = true) ||
                     currentNotificationStatus.contains("Escaneando", ignoreCase = true) ||
                     currentNotificationStatus.contains("Iniciado", ignoreCase = true) ||
                     currentNotificationStatus.isEmpty() -> CHANNEL_ID_WAITING
 
-            // DESCONECTADO: Todos os outros estados (tentando conectar, reconectar, etc.)
             else -> CHANNEL_ID_DISCONNECTED
         }
     }
 
-    // REFATORAÇÃO: Determina o texto correto da notificação
     private fun determineNotificationText(): String {
         return when {
             isConnected && currentDeviceName != null ->
@@ -989,9 +1042,7 @@ class BluetoothService : Service() {
     }
 
     private fun createNotificationChannel() {
-        val manager = getSystemService(NotificationManager::class.java)
-
-        manager.createNotificationChannel(
+        notificationManager.createNotificationChannel(
             NotificationChannel(
                 CHANNEL_ID_WAITING,
                 "Notificação persistente - aguardando conexão",
@@ -999,7 +1050,7 @@ class BluetoothService : Service() {
             )
         )
 
-        manager.createNotificationChannel(
+        notificationManager.createNotificationChannel(
             NotificationChannel(
                 CHANNEL_ID_CONNECTED,
                 "Notificação persistente - conectado",
@@ -1007,7 +1058,7 @@ class BluetoothService : Service() {
             )
         )
 
-        manager.createNotificationChannel(
+        notificationManager.createNotificationChannel(
             NotificationChannel(
                 CHANNEL_ID_DISCONNECTED,
                 "Notificação persistente - desconectado",
@@ -1015,8 +1066,8 @@ class BluetoothService : Service() {
             )
         )
 
-        manager.createNotificationChannel(NotificationChannel(INSTALL_CHANNEL_ID, "APKs", NotificationManager.IMPORTANCE_HIGH))
-        manager.createNotificationChannel(NotificationChannel(MIRRORED_CHANNEL_ID, "Notificações do celular", NotificationManager.IMPORTANCE_HIGH))
+        notificationManager.createNotificationChannel(NotificationChannel(INSTALL_CHANNEL_ID, "APKs", NotificationManager.IMPORTANCE_HIGH))
+        notificationManager.createNotificationChannel(NotificationChannel(MIRRORED_CHANNEL_ID, "Notificações do celular", NotificationManager.IMPORTANCE_HIGH))
     }
 
     private fun savePreference(key: String, value: String) {
@@ -1027,6 +1078,7 @@ class BluetoothService : Service() {
         super.onDestroy()
         try { unregisterReceiver(internalReceiver) } catch(_:Exception){}
         try { unregisterReceiver(watchDismissReceiver) } catch(_:Exception){}
+        mainHandler.removeCallbacksAndMessages(null)
         serviceScope.cancel()
         forceDisconnect()
     }
