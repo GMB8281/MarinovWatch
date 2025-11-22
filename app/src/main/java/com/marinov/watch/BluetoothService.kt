@@ -86,7 +86,6 @@ class BluetoothService : Service() {
     private lateinit var prefs: SharedPreferences
     private val PREF_NAME = "AppPrefs"
 
-    // Armazena o último SSID válido para quando a tela apagar e o Android retornar "unknown"
     private var lastValidWifiSsid: String = ""
 
     @Volatile
@@ -105,6 +104,10 @@ class BluetoothService : Service() {
     private val CONNECTION_TIMEOUT = 60000L
 
     private val notificationMap = ConcurrentHashMap<String, Int>()
+
+    // REFATORAÇÃO: Armazena o último status da notificação
+    @Volatile
+    private var currentNotificationStatus: String = ""
 
     interface ServiceCallback {
         fun onStatusChanged(status: String)
@@ -159,11 +162,6 @@ class BluetoothService : Service() {
         const val INSTALL_NOTIFICATION_ID = 2
         const val MIRRORED_NOTIFICATION_ID_START = 1000
 
-        // --- CANAIS DE NOTIFICAÇÃO ---
-        // Canal antigo (pode ser mantido para compatibilidade ou removido se preferir limpar dados)
-        const val CHANNEL_ID_OLD = "bluetooth_service_channel"
-
-        // Novos Canais Categorizados
         const val CHANNEL_ID_WAITING = "channel_status_waiting"
         const val CHANNEL_ID_CONNECTED = "channel_status_connected"
         const val CHANNEL_ID_DISCONNECTED = "channel_status_disconnected"
@@ -233,21 +231,33 @@ class BluetoothService : Service() {
         }
     }
 
+    // REFATORAÇÃO: onStartCommand simplificado e mais robusto
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP_SERVICE) {
             stopSelf()
             return START_NOT_STICKY
         }
-        if (isConnected) {
-            updateStatus(currentStatus)
-            return START_STICKY
+
+        // Inicia o foreground service com notificação baseada no estado atual
+        startForegroundWithCurrentState()
+
+        // Inicializa lógica se não estiver conectado
+        if (!isConnected) {
+            initializeLogicFromPrefs()
         }
 
-        // Status inicial
-        val notification = createNotification("Aguardando conexão...")
+        return START_STICKY
+    }
+
+    // REFATORAÇÃO: Nova função para iniciar foreground service
+    private fun startForegroundWithCurrentState() {
+        val notification = buildNotificationForCurrentState()
 
         if (Build.VERSION.SDK_INT >= 34) {
-            val hasLocationPerm = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+            val hasLocationPerm = ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
             var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
             if (hasLocationPerm) {
                 type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
@@ -262,9 +272,6 @@ class BluetoothService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
-
-        initializeLogicFromPrefs()
-        return START_STICKY
     }
 
     private fun initializeLogicFromPrefs() {
@@ -379,7 +386,6 @@ class BluetoothService : Service() {
                     } catch (_: Exception) {
                     }
                     handleConnectedSocket(socket, socket.remoteDevice?.name ?: "Dispositivo")
-                    // Após a desconexão, voltamos ao estado de aguardar
                     if (isActive) {
                         updateStatus("Aguardando conexão...")
                     }
@@ -388,17 +394,25 @@ class BluetoothService : Service() {
         }
     }
 
+    // REFATORAÇÃO: handleConnectedSocket com gestão melhorada de estado
     private suspend fun handleConnectedSocket(socket: BluetoothSocket, deviceName: String) {
         this.bluetoothSocket = socket
         globalOutputStream = DataOutputStream(socket.outputStream)
         val inputStream = DataInputStream(socket.inputStream)
 
+        // Define estado de conexão ANTES de atualizar status
         isConnected = true
         isTransferring = false
         lastMessageTime = System.currentTimeMillis()
         currentDeviceName = deviceName
+
+        // Atualiza status E notificação simultaneamente
         updateStatus("Conectado a $deviceName")
-        withContext(Dispatchers.Main) { callback?.onDeviceConnected(deviceName) }
+
+        // Notifica callback
+        withContext(Dispatchers.Main) {
+            callback?.onDeviceConnected(deviceName)
+        }
 
         serviceScope.launch { heartbeatLoop() }
 
@@ -436,9 +450,21 @@ class BluetoothService : Service() {
         } catch (_: IOException) {
             // Conexão perdida
         } finally {
+            // REFATORAÇÃO: Garante atualização completa do estado
+            val wasConnected = isConnected
+
             forceDisconnect()
             isConnected = false
-            withContext(Dispatchers.Main) { callback?.onDeviceDisconnected() }
+            currentDeviceName = null
+
+            // Atualiza status apenas se estava realmente conectado
+            if (wasConnected) {
+                updateStatus("Desconectado")
+            }
+
+            withContext(Dispatchers.Main) {
+                callback?.onDeviceDisconnected()
+            }
         }
     }
 
@@ -464,8 +490,12 @@ class BluetoothService : Service() {
         }
     }
 
+    // REFATORAÇÃO: forceDisconnect com atualização de estado
     private fun forceDisconnect() {
-        try { bluetoothSocket?.close() } catch (_: Exception) {}
+        try {
+            bluetoothSocket?.close()
+        } catch (_: Exception) {}
+
         statusUpdateJob?.cancel()
     }
 
@@ -500,7 +530,7 @@ class BluetoothService : Service() {
                 } catch (e: Exception) {
                     Log.e("BluetoothService", "Erro ao enviar status: ${e.message}")
                 }
-                delay(5000) // Envia a cada 5 segundos
+                delay(5000)
             }
         }
     }
@@ -509,17 +539,14 @@ class BluetoothService : Service() {
     private fun collectWatchStatus(): JSONObject {
         val json = JSONObject()
 
-        // 1. Bateria
         val bm = getSystemService(BATTERY_SERVICE) as BatteryManager
         val batteryLevel = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
         val isCharging = bm.isCharging
 
-        // 2. DND
         val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         val dndEnabled = nm.currentInterruptionFilter != NotificationManager.INTERRUPTION_FILTER_ALL
 
-        // 3. Wi-Fi (Com Memória para Screen Off)
-        var wifiSsid = "Desconectado"
+        var wifiSsid: String
         try {
             if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
                 val wm = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
@@ -527,19 +554,14 @@ class BluetoothService : Service() {
                 if (wm.isWifiEnabled) {
                     val info = wm.connectionInfo
 
-                    // Se tivermos um objeto info e o estado for COMPLETED, estamos conectados.
                     if (info != null && info.supplicantState == SupplicantState.COMPLETED) {
                         val rawSsid = info.ssid
 
-                        // Se o Android esconder o SSID (tela apagada), usamos o último conhecido.
                         if (rawSsid == "<unknown ssid>" || rawSsid.isEmpty()) {
-                            if (lastValidWifiSsid.isNotEmpty()) {
-                                wifiSsid = lastValidWifiSsid // Usa cache
-                            } else {
-                                wifiSsid = "Conectado" // Sem nome, mas conectado
+                            wifiSsid = lastValidWifiSsid.ifEmpty {
+                                "Conectado"
                             }
                         } else {
-                            // Temos um nome válido! Salvamos e usamos.
                             val cleanSsid = rawSsid.replace("\"", "")
                             if (cleanSsid != "<unknown ssid>") {
                                 lastValidWifiSsid = cleanSsid
@@ -551,7 +573,6 @@ class BluetoothService : Service() {
                             }
                         }
                     } else {
-                        // Se não estiver COMPLETED, resetamos o cache.
                         lastValidWifiSsid = ""
                         wifiSsid = "Desconectado"
                     }
@@ -562,7 +583,7 @@ class BluetoothService : Service() {
             } else {
                 wifiSsid = "Sem Permissão"
             }
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             wifiSsid = "Erro Wifi"
         }
 
@@ -646,7 +667,7 @@ class BluetoothService : Service() {
             if (receiveFile != null && receiveFile!!.exists()) {
                 CoroutineScope(Dispatchers.Main).launch {
                     try {
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
+                        if (!packageManager.canRequestPackageInstalls()) {
                             showPermissionNotification()
                             return@launch
                         }
@@ -880,40 +901,52 @@ class BluetoothService : Service() {
         stopSelf()
     }
 
+    // REFATORAÇÃO: stopConnectionLoopOnly com gestão melhorada de estado
     fun stopConnectionLoopOnly() {
         connectionJob?.cancel()
         serverJob?.cancel()
         statusUpdateJob?.cancel()
+
+        val wasConnected = isConnected
+
         forceDisconnect()
+        isConnected = false
+        currentDeviceName = null
         bluetoothSocket = null
-        updateStatus("Parado.")
+
+        // Atualiza status apenas se necessário
+        if (wasConnected || currentNotificationStatus != "Parado.") {
+            updateStatus("Parado.")
+        }
     }
 
+    // REFATORAÇÃO: updateStatus completamente redesenhado
     private fun updateStatus(text: String) {
         CoroutineScope(Dispatchers.Main).launch {
             currentStatus = text
+            currentNotificationStatus = text
+
+            // Atualiza a notificação com o estado atual
+            val notification = buildNotificationForCurrentState()
             val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-            manager.notify(NOTIFICATION_ID, createNotification(text))
+            manager.notify(NOTIFICATION_ID, notification)
+
+            // Notifica callback
             callback?.onStatusChanged(text)
         }
     }
 
-    private fun createNotification(content: String): Notification {
+    // REFATORAÇÃO: Nova função para construir notificação baseada no estado real
+    private fun buildNotificationForCurrentState(): Notification {
         val intent = Intent(this, MainActivity::class.java)
         val pending = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE)
 
-        // Lógica de seleção de canal baseada no Status
-        val channelId = if (isConnected) {
-            CHANNEL_ID_CONNECTED
-        } else if (content.contains("Aguardando") || content.contains("Escaneando") || content.contains("Iniciado")) {
-            CHANNEL_ID_WAITING
-        } else {
-            CHANNEL_ID_DISCONNECTED
-        }
+        val channelId = determineNotificationChannel()
+        val contentText = determineNotificationText()
 
         return NotificationCompat.Builder(this, channelId)
             .setContentTitle("Relógio Inteligente")
-            .setContentText(content)
+            .setContentText(contentText)
             .setSmallIcon(R.drawable.ic_smartwatch_notification)
             .setContentIntent(pending)
             .setOngoing(true)
@@ -921,10 +954,43 @@ class BluetoothService : Service() {
             .build()
     }
 
+    // REFATORAÇÃO: Determina o canal correto baseado APENAS no estado real
+    private fun determineNotificationChannel(): String {
+        return when {
+            // CONECTADO: isConnected é verdadeiro
+            isConnected -> CHANNEL_ID_CONNECTED
+
+            // AGUARDANDO: Estados de espera ou início
+            currentNotificationStatus.contains("Aguardando", ignoreCase = true) ||
+                    currentNotificationStatus.contains("Escaneando", ignoreCase = true) ||
+                    currentNotificationStatus.contains("Iniciado", ignoreCase = true) ||
+                    currentNotificationStatus.isEmpty() -> CHANNEL_ID_WAITING
+
+            // DESCONECTADO: Todos os outros estados (tentando conectar, reconectar, etc.)
+            else -> CHANNEL_ID_DISCONNECTED
+        }
+    }
+
+    // REFATORAÇÃO: Determina o texto correto da notificação
+    private fun determineNotificationText(): String {
+        return when {
+            isConnected && currentDeviceName != null ->
+                "Conectado a $currentDeviceName"
+
+            isConnected && currentDeviceName == null ->
+                "Conectado"
+
+            currentNotificationStatus.isNotEmpty() ->
+                currentNotificationStatus
+
+            else ->
+                "Aguardando conexão..."
+        }
+    }
+
     private fun createNotificationChannel() {
         val manager = getSystemService(NotificationManager::class.java)
 
-        // 1. Canal: Aguardando conexão
         manager.createNotificationChannel(
             NotificationChannel(
                 CHANNEL_ID_WAITING,
@@ -933,7 +999,6 @@ class BluetoothService : Service() {
             )
         )
 
-        // 2. Canal: Conectado
         manager.createNotificationChannel(
             NotificationChannel(
                 CHANNEL_ID_CONNECTED,
@@ -942,7 +1007,6 @@ class BluetoothService : Service() {
             )
         )
 
-        // 3. Canal: Desconectado (inclui tentativas de reconexão)
         manager.createNotificationChannel(
             NotificationChannel(
                 CHANNEL_ID_DISCONNECTED,
