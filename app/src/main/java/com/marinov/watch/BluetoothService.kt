@@ -986,12 +986,22 @@ class BluetoothService : Service() {
     private fun updateNotificationDirect() {
         try {
             val notification = buildNotificationForCurrentState()
-            notificationManager.notify(NOTIFICATION_ID, notification)
+            val channelId = notification.channelId
+            val channel = notificationManager.getNotificationChannel(channelId)
+
+            // Verifica se o canal de notificação está habilitado pelo usuário
+            if (channel != null && channel.importance != NotificationManager.IMPORTANCE_NONE) {
+                // Se o canal estiver habilitado, exibe ou atualiza a notificação
+                notificationManager.notify(NOTIFICATION_ID, notification)
+            } else {
+                // Se o canal estiver desabilitado, remove a notificação persistente para não ficar "presa" na tela.
+                notificationManager.cancel(NOTIFICATION_ID)
+            }
         } catch (e: Exception) {
             if (DEBUG_NOTIFICATIONS) {
                 Log.e(TAG, "updateNotificationDirect: Erro ao atualizar notificação: ${e.message}", e)
             }
-            throw e
+            // A exceção é capturada para evitar que o serviço quebre.
         }
     }
 
