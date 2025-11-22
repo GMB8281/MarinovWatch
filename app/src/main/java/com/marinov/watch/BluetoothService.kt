@@ -119,8 +119,11 @@ class BluetoothService : Service() {
 
     var callback: ServiceCallback? = null
 
+    @Volatile
     var currentStatus: String = "Serviço Iniciado"
+    @Volatile
     var currentDeviceName: String? = null
+    @Volatile
     var isConnected: Boolean = false
 
     // Protocolo V2
@@ -887,10 +890,12 @@ class BluetoothService : Service() {
     }
 
     private fun updateStatus(text: String) {
-        currentStatus = text
-        val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-        manager.notify(NOTIFICATION_ID, createNotification(text))
-        CoroutineScope(Dispatchers.Main).launch { callback?.onStatusChanged(text) }
+        CoroutineScope(Dispatchers.Main).launch {
+            currentStatus = text
+            val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+            manager.notify(NOTIFICATION_ID, createNotification(text))
+            callback?.onStatusChanged(text)
+        }
     }
 
     private fun createNotification(content: String): Notification {
@@ -900,7 +905,7 @@ class BluetoothService : Service() {
         // Lógica de seleção de canal baseada no Status
         val channelId = when {
             // Se estiver conectado, usa o canal de conexão
-            isConnected || content.startsWith("Conectado") -> CHANNEL_ID_CONNECTED
+            content.startsWith("Conectado") -> CHANNEL_ID_CONNECTED
 
             // Se estiver aguardando, escaneando ou iniciando, usa o canal de "Aguardando"
             content.contains("Aguardando") || content.contains("Escaneando") || content.contains("Iniciado") -> CHANNEL_ID_WAITING
