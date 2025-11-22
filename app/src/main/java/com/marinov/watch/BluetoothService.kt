@@ -903,15 +903,12 @@ class BluetoothService : Service() {
         val pending = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE)
 
         // Lógica de seleção de canal baseada no Status
-        val channelId = when {
-            // Se estiver conectado, usa o canal de conexão
-            content.startsWith("Conectado") -> CHANNEL_ID_CONNECTED
-
-            // Se estiver aguardando, escaneando ou iniciando, usa o canal de "Aguardando"
-            content.contains("Aguardando") || content.contains("Escaneando") || content.contains("Iniciado") -> CHANNEL_ID_WAITING
-
-            // Qualquer outra coisa (Desconectado, Reconectando, Tentando, Parado, Erro) cai aqui
-            else -> CHANNEL_ID_DISCONNECTED
+        val channelId = if (isConnected) {
+            CHANNEL_ID_CONNECTED
+        } else if (content.contains("Aguardando") || content.contains("Escaneando") || content.contains("Iniciado")) {
+            CHANNEL_ID_WAITING
+        } else {
+            CHANNEL_ID_DISCONNECTED
         }
 
         return NotificationCompat.Builder(this, channelId)
