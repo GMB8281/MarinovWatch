@@ -352,19 +352,34 @@ class BluetoothService : Service() {
         if (serverJob?.isActive == true) return
         serverJob?.cancel()
         serverJob = serviceScope.launch {
+            updateStatus("Aguardando conexão...")
             while (isActive) {
-                updateStatus("Aguardando conexão...")
                 var serverSocket: BluetoothServerSocket?
-                try { serverSocket = bluetoothAdapter?.listenUsingRfcommWithServiceRecord(APP_NAME, APP_UUID) }
-                catch (_: IOException) { delay(3000); continue }
+                try {
+                    serverSocket = bluetoothAdapter?.listenUsingRfcommWithServiceRecord(APP_NAME, APP_UUID)
+                } catch (_: IOException) {
+                    delay(3000)
+                    continue
+                }
 
                 var socket: BluetoothSocket? = null
                 while (socket == null && isActive) {
-                    try { socket = serverSocket?.accept(5000) } catch (_: IOException) {}
+                    try {
+                        socket = serverSocket?.accept(5000)
+                    } catch (_: IOException) {
+                    }
                 }
+
                 if (socket != null) {
-                    try { serverSocket?.close() } catch (_: Exception) {}
+                    try {
+                        serverSocket?.close()
+                    } catch (_: Exception) {
+                    }
                     handleConnectedSocket(socket, socket.remoteDevice?.name ?: "Dispositivo")
+                    // Após a desconexão, voltamos ao estado de aguardar
+                    if (isActive) {
+                        updateStatus("Aguardando conexão...")
+                    }
                 }
             }
         }
