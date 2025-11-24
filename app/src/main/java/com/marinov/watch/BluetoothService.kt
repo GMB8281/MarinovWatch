@@ -1,7 +1,6 @@
 package com.marinov.watch
 
 import android.Manifest
-import com.marinov.watch.R
 import android.annotation.SuppressLint
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -15,6 +14,7 @@ import android.bluetooth.BluetoothSocket
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import com.marinov.watch.R
 import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.content.pm.ApplicationInfo
@@ -938,7 +938,7 @@ class BluetoothService : Service() {
             val notification = NotificationCompat.Builder(this, targetChannel)
                 .setContentTitle("Relógio Inteligente")
                 .setContentText(targetText)
-                .setSmallIcon(android.R.drawable.ic_smartwatch_notification)
+                .setSmallIcon(R.drawable.ic_smartwatch_notification)
                 .setContentIntent(pending)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
