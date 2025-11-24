@@ -2,7 +2,6 @@ package com.marinov.watch
 
 import android.Manifest
 import android.annotation.SuppressLint
-import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -31,7 +30,6 @@ import android.os.BatteryManager
 import android.os.Binder
 import android.os.Build
 import android.os.Handler
-import com.marinov.watch.R
 import android.os.IBinder
 import android.os.Looper
 import android.provider.Settings
@@ -69,7 +67,6 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicLong
 
 class BluetoothService : Service() {
 
@@ -114,7 +111,6 @@ class BluetoothService : Service() {
     private var currentNotificationStatus: String = ""
 
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val notificationUpdateCounter = AtomicLong(0)
 
     // Cache do NotificationManager para evitar múltiplas chamadas getSystemService
     private val notificationManager: NotificationManager by lazy {
@@ -170,7 +166,11 @@ class BluetoothService : Service() {
         const val EXTRA_NOTIF_JSON = "extra_notif_json"
         const val EXTRA_NOTIF_KEY = "extra_notif_key"
 
-        const val NOTIFICATION_ID = 1
+        // IDs DISTINTOS para garantir limpeza correta ao trocar de estado
+        const val NOTIFICATION_ID_WAITING = 10
+        const val NOTIFICATION_ID_CONNECTED = 11
+        const val NOTIFICATION_ID_DISCONNECTED = 12
+
         const val INSTALL_NOTIFICATION_ID = 2
         const val MIRRORED_NOTIFICATION_ID_START = 1000
 
@@ -255,7 +255,6 @@ class BluetoothService : Service() {
         }
 
         // CRÍTICO: Chamar startForeground imediatamente para cumprir a promessa feita no BootReceiver.
-        // O Android dá ~5 segundos para isso. Se não chamarmos, app crasha.
         updateForegroundNotification()
 
         // Inicializa lógica se não estiver conectado
@@ -904,129 +903,90 @@ class BluetoothService : Service() {
             updateStatus("Parado.")
         }
     }
-
-    // ========================================================================
-    // REFATORAÇÃO CRÍTICA: SISTEMA DE ATUALIZAÇÃO DE NOTIFICAÇÕES (CORRIGIDO)
-    // ========================================================================
-
-    /**
-     * Atualiza o status do serviço, gerenciando a notificação de foreground de forma atômica.
-     * Esta função é thread-safe e funciona mesmo quando o app está em background.
-     */
     private fun updateStatus(text: String) {
         currentStatus = text
         currentNotificationStatus = text
 
-        val updateId = notificationUpdateCounter.incrementAndGet()
-        if (DEBUG_NOTIFICATIONS) {
-            Log.d(TAG, "updateStatus #$updateId: text='$text', isConnected=$isConnected")
-        }
-
-        // Garante que a atualização da notificação ocorra no thread principal.
         mainHandler.post {
             try {
                 updateForegroundNotification()
-                if (DEBUG_NOTIFICATIONS) {
-                    Log.d(TAG, "updateStatus #$updateId: Atualização via Handler concluída")
-                }
             } catch (e: Exception) {
-                if (DEBUG_NOTIFICATIONS) {
-                    Log.e(TAG, "updateStatus #$updateId: Falha na atualização via Handler: ${e.message}")
-                }
+                if (DEBUG_NOTIFICATIONS) Log.e(TAG, "updateStatus erro: ${e.message}")
             }
-            // Notifica a UI
             callback?.onStatusChanged(text)
         }
     }
 
     /**
-     * ÚNICA FONTE DA VERDADE para gerenciar a notificação de foreground.
-     *
-     * CORREÇÃO DO CRASH:
-     * O Android exige que 'startForeground' seja chamado se o serviço foi iniciado via 'startForegroundService'.
-     * Se o usuário bloqueou o canal de notificação, 'startForeground' DEVE SER CHAMADO MESMO ASSIM.
-     * O sistema irá suprimir a visualização, mas o serviço continuará rodando (foreground "oculto").
-     *
-     * A lógica anterior verificava 'channel.importance' e pulava 'startForeground', causando crash
-     * de "ForegroundServiceDidNotStartInTimeException".
+     * CORREÇÃO DEFINITIVA PARA CANAIS BLOQUEADOS:
+     * Ao invés de usar um único ID, usamos um ID diferente para cada estado (Waiting, Connected, etc).
+     * * Lógica:
+     * 1. Determinamos o Estado Atual -> Novo ID e Novo Canal.
+     * 2. Chamamos startForeground com o NOVO ID. Isso "segura" o serviço e previne crashes.
+     * 3. Se o usuário bloqueou esse canal, o Android não mostra nada (correto).
+     * 4. CRUCIAL: Chamamos .cancel() nos IDs dos estados antigos. Isso garante que a notificação "Waiting"
+     * suma visualmente se mudamos para "Connected", mesmo que "Connected" esteja oculto.
      */
     private fun updateForegroundNotification() {
         try {
-            // Prepara a notificação com base no estado atual.
-            val notification = buildNotificationForCurrentState()
+            val (targetId, targetChannel, targetText) = determineNotificationState()
 
-            // Simplesmente chama startForeground.
-            // Se o canal estiver bloqueado, o Android não mostra o ícone, mas mantém o serviço vivo.
-            // Isso corrige o crash e respeita a vontade do usuário de não ver notificações.
+            val intent = Intent(this, MainActivity::class.java)
+            val pending = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE)
 
+            val notification = NotificationCompat.Builder(this, targetChannel)
+                .setContentTitle("Relógio Inteligente")
+                .setContentText(targetText)
+                .setSmallIcon(android.R.drawable.stat_notify_sync) // Ícone seguro do sistema
+                .setContentIntent(pending)
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .build()
+
+            // Inicia/Atualiza o Foreground no ID correto do estado atual
             if (Build.VERSION.SDK_INT >= 34) {
-                val hasLocationPerm = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-                var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
-                if (hasLocationPerm) {
-                    type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
-                }
-                startForeground(NOTIFICATION_ID, notification, type)
+                val hasLocation = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+                val type = if (hasLocation) ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+                else ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+                startForeground(targetId, notification, type)
             } else if (Build.VERSION.SDK_INT >= 29) {
                 var type = 0
                 if (Build.VERSION.SDK_INT >= 31) {
                     type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
                 }
-                startForeground(NOTIFICATION_ID, notification, type)
+                startForeground(targetId, notification, type)
             } else {
-                startForeground(NOTIFICATION_ID, notification)
+                startForeground(targetId, notification)
             }
 
+            // LIMPEZA: Remove visualmente as notificações dos outros estados.
+            // Isso corrige o bug onde "Aguardando" persistia se "Conectado" estivesse bloqueado.
+            if (targetId != NOTIFICATION_ID_WAITING) notificationManager.cancel(NOTIFICATION_ID_WAITING)
+            if (targetId != NOTIFICATION_ID_CONNECTED) notificationManager.cancel(NOTIFICATION_ID_CONNECTED)
+            if (targetId != NOTIFICATION_ID_DISCONNECTED) notificationManager.cancel(NOTIFICATION_ID_DISCONNECTED)
+
         } catch (e: Exception) {
-            if (DEBUG_NOTIFICATIONS) {
-                Log.e(TAG, "updateForegroundNotification: Erro: ${e.message}", e)
-            }
+            if (DEBUG_NOTIFICATIONS) Log.e(TAG, "updateForegroundNotification: Erro: ${e.message}", e)
         }
     }
 
-
-    private fun buildNotificationForCurrentState(): Notification {
-        val intent = Intent(this, MainActivity::class.java)
-        val pending = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE)
-
-        val channelId = determineNotificationChannel()
-        val contentText = determineNotificationText()
-
-        return NotificationCompat.Builder(this, channelId)
-            .setContentTitle("Relógio Inteligente")
-            .setContentText(contentText)
-            .setSmallIcon(R.drawable.ic_smartwatch_notification)
-            .setContentIntent(pending)
-            .setOngoing(true)
-            .setOnlyAlertOnce(true)
-            .build()
-    }
-
-    private fun determineNotificationChannel(): String {
+    // Retorna Triple(ID, Channel, Text)
+    private fun determineNotificationState(): Triple<Int, String, String> {
         return when {
-            isConnected -> CHANNEL_ID_CONNECTED
+            isConnected && currentDeviceName != null ->
+                Triple(NOTIFICATION_ID_CONNECTED, CHANNEL_ID_CONNECTED, "Conectado a $currentDeviceName")
+
+            isConnected && currentDeviceName == null ->
+                Triple(NOTIFICATION_ID_CONNECTED, CHANNEL_ID_CONNECTED, "Conectado")
 
             currentNotificationStatus.contains("Aguardando", ignoreCase = true) ||
                     currentNotificationStatus.contains("Escaneando", ignoreCase = true) ||
                     currentNotificationStatus.contains("Iniciado", ignoreCase = true) ||
-                    currentNotificationStatus.isEmpty() -> CHANNEL_ID_WAITING
-
-            else -> CHANNEL_ID_DISCONNECTED
-        }
-    }
-
-    private fun determineNotificationText(): String {
-        return when {
-            isConnected && currentDeviceName != null ->
-                "Conectado a $currentDeviceName"
-
-            isConnected && currentDeviceName == null ->
-                "Conectado"
-
-            currentNotificationStatus.isNotEmpty() ->
-                currentNotificationStatus
+                    currentNotificationStatus.isEmpty() ->
+                Triple(NOTIFICATION_ID_WAITING, CHANNEL_ID_WAITING, currentNotificationStatus.ifEmpty { "Aguardando conexão..." })
 
             else ->
-                "Aguardando conexão..."
+                Triple(NOTIFICATION_ID_DISCONNECTED, CHANNEL_ID_DISCONNECTED, currentNotificationStatus)
         }
     }
 
