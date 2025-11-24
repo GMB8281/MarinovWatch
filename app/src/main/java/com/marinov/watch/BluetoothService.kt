@@ -30,8 +30,9 @@ import android.net.wifi.WifiManager
 import android.os.BatteryManager
 import android.os.Binder
 import android.os.Build
-import android.os.IBinder
 import android.os.Handler
+import com.marinov.watch.R
+import android.os.IBinder
 import android.os.Looper
 import android.provider.Settings
 import android.util.Base64
