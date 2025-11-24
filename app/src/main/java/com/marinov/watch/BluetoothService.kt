@@ -253,7 +253,8 @@ class BluetoothService : Service() {
             return START_NOT_STICKY
         }
 
-        // Inicia ou atualiza o foreground service com a notificação correta
+        // CRÍTICO: Chamar startForeground imediatamente para cumprir a promessa feita no BootReceiver.
+        // O Android dá ~5 segundos para isso. Se não chamarmos, app crasha.
         updateForegroundNotification()
 
         // Inicializa lógica se não estiver conectado
@@ -904,7 +905,7 @@ class BluetoothService : Service() {
     }
 
     // ========================================================================
-    // REFATORAÇÃO CRÍTICA: SISTEMA DE ATUALIZAÇÃO DE NOTIFICAÇÕES
+    // REFATORAÇÃO CRÍTICA: SISTEMA DE ATUALIZAÇÃO DE NOTIFICAÇÕES (CORRIGIDO)
     // ========================================================================
 
     /**
@@ -939,48 +940,41 @@ class BluetoothService : Service() {
 
     /**
      * ÚNICA FONTE DA VERDADE para gerenciar a notificação de foreground.
-     * Garante que a notificação anterior seja limpa antes de exibir a nova.
+     *
+     * CORREÇÃO DO CRASH:
+     * O Android exige que 'startForeground' seja chamado se o serviço foi iniciado via 'startForegroundService'.
+     * Se o usuário bloqueou o canal de notificação, 'startForeground' DEVE SER CHAMADO MESMO ASSIM.
+     * O sistema irá suprimir a visualização, mas o serviço continuará rodando (foreground "oculto").
+     *
+     * A lógica anterior verificava 'channel.importance' e pulava 'startForeground', causando crash
+     * de "ForegroundServiceDidNotStartInTimeException".
      */
     private fun updateForegroundNotification() {
         try {
-            // 1. Remove a notificação anterior e desvincula o serviço do estado de foreground.
-            // O serviço continua rodando, mas está pronto para ser promovido novamente.
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                stopForeground(STOP_FOREGROUND_DETACH)
-            } else {
-                @Suppress("DEPRECATION")
-                stopForeground(false)
-            }
-            notificationManager.cancel(NOTIFICATION_ID) // Garante a remoção
-
-            // 2. Prepara a nova notificação com base no estado atual.
+            // Prepara a notificação com base no estado atual.
             val notification = buildNotificationForCurrentState()
-            val channelId = notification.channelId
-            val channel = notificationManager.getNotificationChannel(channelId)
 
-            // 3. Verifica se o novo canal de notificação está habilitado pelo usuário.
-            if (channel != null && channel.importance != NotificationManager.IMPORTANCE_NONE) {
-                // 4. Se o canal estiver habilitado, promove o serviço para foreground novamente
-                // com a nova notificação.
-                if (Build.VERSION.SDK_INT >= 34) {
-                    val hasLocationPerm = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-                    var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
-                    if (hasLocationPerm) {
-                        type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
-                    }
-                    startForeground(NOTIFICATION_ID, notification, type)
-                } else if (Build.VERSION.SDK_INT >= 29) {
-                    var type = 0
-                    if (Build.VERSION.SDK_INT >= 31) {
-                        type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
-                    }
-                    startForeground(NOTIFICATION_ID, notification, type)
-                } else {
-                    startForeground(NOTIFICATION_ID, notification)
+            // Simplesmente chama startForeground.
+            // Se o canal estiver bloqueado, o Android não mostra o ícone, mas mantém o serviço vivo.
+            // Isso corrige o crash e respeita a vontade do usuário de não ver notificações.
+
+            if (Build.VERSION.SDK_INT >= 34) {
+                val hasLocationPerm = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+                var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+                if (hasLocationPerm) {
+                    type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
                 }
+                startForeground(NOTIFICATION_ID, notification, type)
+            } else if (Build.VERSION.SDK_INT >= 29) {
+                var type = 0
+                if (Build.VERSION.SDK_INT >= 31) {
+                    type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+                }
+                startForeground(NOTIFICATION_ID, notification, type)
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
             }
-            // Se o canal estiver desabilitado, o serviço simplesmente continua em background
-            // (não-foreground) sem notificação, até o próximo updateStatus.
+
         } catch (e: Exception) {
             if (DEBUG_NOTIFICATIONS) {
                 Log.e(TAG, "updateForegroundNotification: Erro: ${e.message}", e)
