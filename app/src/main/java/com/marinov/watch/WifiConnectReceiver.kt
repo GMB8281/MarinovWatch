@@ -32,7 +32,7 @@ class WifiConnectReceiver : BroadcastReceiver() {
                 nm.cancel(notifId)
             }
 
-            // Executa em thread separada para não travar UI com comandos Root
+            // Executa em thread separada
             val pendingResult = goAsync()
             Executors.newSingleThreadExecutor().execute {
                 try {
@@ -62,7 +62,8 @@ class WifiConnectReceiver : BroadcastReceiver() {
             // ============================================================================
             // CENÁRIO 2: ANDROID 10 E INFERIOR -> TENTATIVA "LEGACY"
             // ============================================================================
-            // Tenta o método nativo antigo. Se funcionar, ótimo.
+            // Tenta o método nativo antigo. No Android 10, isso geralmente falha (retorna false)
+            // para apps normais, mas funciona perfeitamente no Android 9 e inferior.
             val legacySuccess = connectLegacy(context, ssid, password, security)
             if (legacySuccess) {
                 showToast(context, "Conectado via Método Nativo!")
@@ -72,11 +73,12 @@ class WifiConnectReceiver : BroadcastReceiver() {
             // ============================================================================
             // CENÁRIO 3: ROOT (FALLBACK ROBUSTO)
             // ============================================================================
-            // Se chegou aqui, usamos força bruta via Root.
+            // Se chegou aqui, ou é Android 10 (onde legacy falha) ou deu erro no Android 9.
+            // Usamos força bruta.
             val rootSuccess = connectViaRootRobust(ssid, password, security)
 
             if (rootSuccess) {
-                showToast(context, "Comando Root enviado! Verifique o Wi-Fi.")
+                showToast(context, "Comando Root enviado com sucesso. Verifique a conexão.")
             } else {
                 showToast(context, "Falha ao conectar via Root. Tente manualmente.")
             }
@@ -143,7 +145,7 @@ class WifiConnectReceiver : BroadcastReceiver() {
             }
 
             val netId = wifiManager.addNetwork(wifiConfig)
-            if (netId == -1) return false
+            if (netId == -1) return false // Falha (comum no Android 10)
 
             wifiManager.disconnect()
             val enabled = wifiManager.enableNetwork(netId, true)
@@ -156,31 +158,31 @@ class WifiConnectReceiver : BroadcastReceiver() {
     }
 
     /**
-     * Estratégia de Root Agressiva
-     * Tenta 3 métodos: CMD WIFI -> WPA_CLI -> INJEÇÃO DIRETA EM ARQUIVO
+     * Estratégia de Root Agressiva para Android 10 e anteriores
      */
     private fun connectViaRootRobust(ssid: String, password: String, security: String): Boolean {
-        // Removemos a verificação prévia 'hasRootAccess()' para evitar overhead e
-        // permitir que o fluxo siga direto para os comandos 'su'.
-        // Se o su falhar, o exitCode será != 0 e o loop continua.
+        if (!hasRootAccess()) return false
 
         val commands = mutableListOf<String>()
         val isOpen = (security == "OPEN")
         val isWep = (security == "WEP")
 
-        // --- MÉTODO 1: CMD WIFI (Android 10+) ---
+        // 1. CMD WIFI (Funciona melhor no Android 10+)
+        // Sintaxe: cmd wifi connect-network <ssid> <security type> <password>
         if (isOpen) {
             commands.add("cmd wifi connect-network \"$ssid\" open")
         } else if (isWep) {
             commands.add("cmd wifi connect-network \"$ssid\" wep \"$password\"")
         } else {
+            // WPA/WPA2
             commands.add("cmd wifi connect-network \"$ssid\" wpa2 \"$password\"")
         }
 
-        // --- MÉTODO 2: WPA_CLI (Legado Robusto) ---
-        // Tenta detectar interface, se falhar, tenta wlan0
+        // 2. WPA_CLI com interface explícita (wlan0 é o padrão)
+        // Isso é crucial para muitos dispositivos onde o wpa_cli falha sem o argumento -i
         val wpaCmd = StringBuilder()
-        wpaCmd.append("iface=wlan0; ") // Assume wlan0 como padrão seguro
+        // Adiciona rede e pega o ID
+        wpaCmd.append("iface=wlan0; ")
         wpaCmd.append("id=$(wpa_cli -i \$iface add_network | tail -n 1); ")
         wpaCmd.append("wpa_cli -i \$iface set_network \$id ssid '\"$ssid\"'; ")
 
@@ -200,47 +202,39 @@ class WifiConnectReceiver : BroadcastReceiver() {
 
         commands.add(wpaCmd.toString())
 
-        // --- MÉTODO 3: INJEÇÃO DIRETA (O "Nuclear") ---
-        // Escreve direto no wpa_supplicant.conf e reinicia o Wi-Fi.
-        // Isso resolve casos onde wpa_cli e cmd wifi não têm permissão de socket.
-        val confEntry = StringBuilder()
-        confEntry.append("\\nnetwork={\\n")
-        confEntry.append("    ssid=\\\"$ssid\\\"\\n")
-        if (isOpen) {
-            confEntry.append("    key_mgmt=NONE\\n")
-        } else if (isWep) {
-            confEntry.append("    key_mgmt=NONE\\n")
-            confEntry.append("    wep_key0=\\\"$password\\\"\\n")
-        } else {
-            confEntry.append("    psk=\\\"$password\\\"\\n")
-            confEntry.append("    key_mgmt=WPA-PSK\\n")
-        }
-        confEntry.append("}\\n")
+        // 3. WPA_CLI sem interface (fallback se wlan0 não for o nome)
+        val wpaCmdGeneric = wpaCmd.toString().replace("-i wlan0", "").replace("-i \$iface", "")
+        commands.add(wpaCmdGeneric)
 
-        val injectCmd = "echo -e \"$confEntry\" >> /data/misc/wifi/wpa_supplicant.conf; svc wifi disable; sleep 2; svc wifi enable"
-        commands.add(injectCmd)
+        // 4. SVC WIFI (Reiniciar driver)
+        // Se adicionou mas não conectou, reiniciar o wifi força a leitura do wpa_supplicant.conf atualizado
+        commands.add("svc wifi disable; sleep 2; svc wifi enable")
 
         var anyCommandWorked = false
 
         for (cmd in commands) {
             try {
-                // Executa o comando e espera. Se o usuário precisar dar permissão no prompt do Magisk,
-                // o waitFor() vai segurar a execução até ele responder.
                 val p = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
                 val exitCode = p.waitFor()
-
                 if (exitCode == 0) {
                     anyCommandWorked = true
-                    // Se funcionou via CMD ou WPA_CLI, paramos.
-                    // Se for injeção (último), ele já rodou.
-                    if (cmd.startsWith("cmd") || cmd.startsWith("iface")) break
+                    // Se o cmd wifi funcionou, paramos. Se for wpa_cli, continuamos para garantir o reassociate.
+                    if (cmd.startsWith("cmd")) break
                 }
             } catch (e: Exception) {
-                // Tenta o próximo método silenciosamente
+                // Falha silenciosa, tenta próximo método
             }
         }
 
         return anyCommandWorked
+    }
+
+    private fun hasRootAccess(): Boolean {
+        return try {
+            Runtime.getRuntime().exec(arrayOf("su", "-c", "id")).waitFor() == 0
+        } catch (e: Exception) {
+            false
+        }
     }
 
     private fun showToast(context: Context, message: String) {
