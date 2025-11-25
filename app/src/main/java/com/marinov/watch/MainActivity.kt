@@ -221,8 +221,14 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
 
         val options = listOf(
             MenuOption(
+                "Sincronizar Wi-Fi",
+                "Enviar redes salvas (Requer Root)",
+                android.R.drawable.ic_menu_share,
+                { runIfConnected { checkRootAndOpenWifi() } }
+            ),
+            MenuOption(
                 "Gerenciar Aplicativos",
-                "Ver lista de apps instalados no relógio.",
+                "Ver lista de apps instalados no Watch",
                 android.R.drawable.ic_menu_sort_by_size,
                 { runIfConnected { startActivity(Intent(this, AppListActivity::class.java)) } }
             ),
@@ -234,19 +240,13 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
             ),
             MenuOption(
                 "Instalar APK",
-                "Enviar arquivo .apk para o relógio.",
+                "Enviar arquivo .apk para o Watch",
                 android.R.drawable.ic_input_add,
                 { runIfConnected { pickApkLauncher.launch("application/vnd.android.package-archive") } }
             ),
             MenuOption(
-                "Sincronizar Wi-Fi",
-                "Conectar o relógio a novas redes Wi-FI salvas.",
-                android.R.drawable.ic_menu_share,
-                { runIfConnected { checkRootAndOpenWifi() } }
-            ),
-            MenuOption(
                 "Desligar Smartwatch",
-                "Desligar completamente o relógio inteligente.",
+                "Desligar completamente o smartwatch",
                 android.R.drawable.ic_lock_power_off,
                 { runIfConnected { confirmShutdownWatch() } }
             ),
@@ -261,7 +261,7 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
             ),
             MenuOption(
                 "Resetar Tudo",
-                "Apagar configurações e voltar a configuração inicial.",
+                "Apagar configurações e voltar ao início",
                 android.R.drawable.ic_menu_delete,
                 { resetApp() }
             )
