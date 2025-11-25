@@ -49,38 +49,43 @@ class WifiConnectReceiver : BroadcastReceiver() {
             val json = JSONObject(jsonString)
             val ssid = json.getString("ssid")
             val password = json.optString("password", "")
+            // Recupera o tipo de segurança enviado pelo novo diálogo manual
+            // Se não vier (versão antiga), usa a lógica antiga (vazio = OPEN)
             val security = json.optString("security", if (password.isEmpty()) "OPEN" else "WPA")
 
             // ============================================================================
             // CENÁRIO 1: ANDROID 11+ (API 30+) -> API NATIVA (Suggestions UI)
             // ============================================================================
+            // A Intent Settings.ACTION_WIFI_ADD_NETWORKS foi adicionada apenas na API 30 (Android 11).
+            // Usar isso no Android 10 causa "ActivityNotFoundException".
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 openSystemWifiDialog(context, ssid, password, security)
                 return
             }
 
             // ============================================================================
-            // CENÁRIO 2: ANDROID 10 E INFERIOR -> TENTATIVA "LEGACY"
+            // CENÁRIO 2: ANDROID 10 E INFERIOR -> TENTATIVA "LEGACY" (WifiConfiguration)
             // ============================================================================
-            // Tenta o método nativo antigo. No Android 10, isso geralmente falha (retorna false)
-            // para apps normais, mas funciona perfeitamente no Android 9 e inferior.
+            // Android 10 (Q) e anteriores usam a lógica do colaborador (WifiConfiguration).
+            // Isso evita o erro de Intent e usa o método padrão da época.
             val legacySuccess = connectLegacy(context, ssid, password, security)
             if (legacySuccess) {
-                showToast(context, "Conectado via Método Nativo!")
+                showToast(context, "Conectando via Método Legado (Nativo)...")
+                // Tentamos reconectar explicitamente, pois o método legacy pode apenas adicionar a config
                 return
             }
 
             // ============================================================================
             // CENÁRIO 3: ROOT (FALLBACK ROBUSTO)
             // ============================================================================
-            // Se chegou aqui, ou é Android 10 (onde legacy falha) ou deu erro no Android 9.
-            // Usamos força bruta.
+            // Se o método nativo falhar (comum em Android 10 sem permissão de sistema),
+            // tentamos força bruta via Root.
             val rootSuccess = connectViaRootRobust(ssid, password, security)
 
             if (rootSuccess) {
-                showToast(context, "Comando Root enviado com sucesso. Verifique a conexão.")
+                showToast(context, "Rede salva e conectando via Root!")
             } else {
-                showToast(context, "Falha ao conectar via Root. Tente manualmente.")
+                showToast(context, "Falha ao conectar. Tente conectar manualmente.")
             }
 
         } catch (e: Exception) {
@@ -100,6 +105,7 @@ class WifiConnectReceiver : BroadcastReceiver() {
             } else if (security == "WEP") {
                 builder.setWpa2Passphrase(password)
             }
+            // Se for OPEN, não define senha.
 
             val suggestion = builder.build()
             val list = ArrayList<WifiNetworkSuggestion>()
@@ -118,11 +124,14 @@ class WifiConnectReceiver : BroadcastReceiver() {
         }
     }
 
+    // IMPLEMENTAÇÃO DO CÓDIGO DO COLABORADOR (Funcional em Android 10 e inferior)
     @Suppress("DEPRECATION")
     private fun connectLegacy(context: Context, ssid: String, password: String, security: String): Boolean {
         return try {
             val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+
             val wifiConfig = WifiConfiguration()
+            // Aspas são obrigatórias para strings SSID no WifiConfiguration antigo
             wifiConfig.SSID = "\"$ssid\""
 
             when (security) {
@@ -145,7 +154,7 @@ class WifiConnectReceiver : BroadcastReceiver() {
             }
 
             val netId = wifiManager.addNetwork(wifiConfig)
-            if (netId == -1) return false // Falha (comum no Android 10)
+            if (netId == -1) return false
 
             wifiManager.disconnect()
             val enabled = wifiManager.enableNetwork(netId, true)
@@ -158,75 +167,63 @@ class WifiConnectReceiver : BroadcastReceiver() {
     }
 
     /**
-     * Estratégia de Root Agressiva para Android 10 e anteriores
+     * Tenta múltiplas estratégias de Root.
      */
     private fun connectViaRootRobust(ssid: String, password: String, security: String): Boolean {
         if (!hasRootAccess()) return false
 
         val commands = mutableListOf<String>()
         val isOpen = (security == "OPEN")
-        val isWep = (security == "WEP")
 
-        // 1. CMD WIFI (Funciona melhor no Android 10+)
-        // Sintaxe: cmd wifi connect-network <ssid> <security type> <password>
+        // --- ESTRATÉGIA A: CMD WIFI (Android 10+) ---
+        // Mesmo no Android 10, se o legado falhar, o cmd wifi pode funcionar via root
         if (isOpen) {
             commands.add("cmd wifi connect-network \"$ssid\" open")
-        } else if (isWep) {
-            commands.add("cmd wifi connect-network \"$ssid\" wep \"$password\"")
+            commands.add("cmd wifi connect \"$ssid\" open")
         } else {
-            // WPA/WPA2
             commands.add("cmd wifi connect-network \"$ssid\" wpa2 \"$password\"")
+            commands.add("cmd wifi connect \"$ssid\" \"$password\"")
         }
 
-        // 2. WPA_CLI com interface explícita (wlan0 é o padrão)
-        // Isso é crucial para muitos dispositivos onde o wpa_cli falha sem o argumento -i
+        // --- ESTRATÉGIA B: WPA_CLI (Legado robusto) ---
         val wpaCmd = StringBuilder()
-        // Adiciona rede e pega o ID
-        wpaCmd.append("iface=wlan0; ")
-        wpaCmd.append("id=$(wpa_cli -i \$iface add_network | tail -n 1); ")
-        wpaCmd.append("wpa_cli -i \$iface set_network \$id ssid '\"$ssid\"'; ")
+        wpaCmd.append("id=$(wpa_cli add_network | tail -n 1); ")
+        wpaCmd.append("wpa_cli set_network \$id ssid '\"$ssid\"'; ")
 
-        when {
-            isOpen -> wpaCmd.append("wpa_cli -i \$iface set_network \$id key_mgmt NONE; ")
-            isWep -> {
-                wpaCmd.append("wpa_cli -i \$iface set_network \$id key_mgmt NONE; ")
-                wpaCmd.append("wpa_cli -i \$iface set_network \$id wep_key0 '\"$password\"'; ")
+        when (security) {
+            "OPEN" -> {
+                wpaCmd.append("wpa_cli set_network \$id key_mgmt NONE; ")
             }
-            else -> wpaCmd.append("wpa_cli -i \$iface set_network \$id psk '\"$password\"'; ")
+            "WEP" -> {
+                wpaCmd.append("wpa_cli set_network \$id key_mgmt NONE; ")
+                wpaCmd.append("wpa_cli set_network \$id wep_key0 '\"$password\"'; ")
+            }
+            else -> { // WPA
+                wpaCmd.append("wpa_cli set_network \$id psk '\"$password\"'; ")
+            }
         }
 
-        wpaCmd.append("wpa_cli -i \$iface enable_network \$id; ")
-        wpaCmd.append("wpa_cli -i \$iface select_network \$id; ")
-        wpaCmd.append("wpa_cli -i \$iface save_config; ")
-        wpaCmd.append("wpa_cli -i \$iface reassociate")
+        wpaCmd.append("wpa_cli enable_network \$id; ")
+        wpaCmd.append("wpa_cli save_config; ")
+        wpaCmd.append("wpa_cli select_network \$id; ")
+        wpaCmd.append("wpa_cli reassociate")
 
         commands.add(wpaCmd.toString())
 
-        // 3. WPA_CLI sem interface (fallback se wlan0 não for o nome)
-        val wpaCmdGeneric = wpaCmd.toString().replace("-i wlan0", "").replace("-i \$iface", "")
-        commands.add(wpaCmdGeneric)
-
-        // 4. SVC WIFI (Reiniciar driver)
-        // Se adicionou mas não conectou, reiniciar o wifi força a leitura do wpa_supplicant.conf atualizado
-        commands.add("svc wifi disable; sleep 2; svc wifi enable")
-
-        var anyCommandWorked = false
-
+        var anySuccess = false
         for (cmd in commands) {
             try {
                 val p = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
                 val exitCode = p.waitFor()
                 if (exitCode == 0) {
-                    anyCommandWorked = true
-                    // Se o cmd wifi funcionou, paramos. Se for wpa_cli, continuamos para garantir o reassociate.
+                    anySuccess = true
                     if (cmd.startsWith("cmd")) break
                 }
             } catch (e: Exception) {
-                // Falha silenciosa, tenta próximo método
             }
         }
 
-        return anyCommandWorked
+        return anySuccess
     }
 
     private fun hasRootAccess(): Boolean {
