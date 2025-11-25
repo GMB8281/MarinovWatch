@@ -54,40 +54,38 @@ class WifiConnectReceiver : BroadcastReceiver() {
             val security = json.optString("security", if (password.isEmpty()) "OPEN" else "WPA")
 
             // ============================================================================
-            // CENÁRIO 1: ANDROID 10+ (API 29+) -> API NATIVA (Suggestions)
+            // CENÁRIO 1: ANDROID 11+ (API 30+) -> API NATIVA (Suggestions UI)
             // ============================================================================
-            // Nota: O usuário relatou problemas no Android 10 com o fluxo antigo.
-            // A API de Suggestions é o padrão oficial para 10+.
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                // Se for Android 10 (Q) ou superior, tenta o método oficial primeiro.
-                // Se o usuário preferir Root mesmo no 10, pode-se inverter essa lógica,
-                // mas Suggestions é mais estável se o app não for de sistema.
+            // A Intent Settings.ACTION_WIFI_ADD_NETWORKS foi adicionada apenas na API 30 (Android 11).
+            // Usar isso no Android 10 causa "ActivityNotFoundException".
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 openSystemWifiDialog(context, ssid, password, security)
                 return
             }
 
             // ============================================================================
-            // CENÁRIO 2: ANDROID 9 OU INFERIOR -> TENTATIVA "LEGACY" (WifiConfiguration)
+            // CENÁRIO 2: ANDROID 10 E INFERIOR -> TENTATIVA "LEGACY" (WifiConfiguration)
             // ============================================================================
-            // Aqui usamos o código sugerido pelo colaborador. É o método padrão para
-            // Androids antigos e geralmente não requer Root se o app tiver permissão
-            // CHANGE_WIFI_STATE (que deve estar no manifesto).
+            // Android 10 (Q) e anteriores usam a lógica do colaborador (WifiConfiguration).
+            // Isso evita o erro de Intent e usa o método padrão da época.
             val legacySuccess = connectLegacy(context, ssid, password, security)
             if (legacySuccess) {
                 showToast(context, "Conectando via Método Legado (Nativo)...")
+                // Tentamos reconectar explicitamente, pois o método legacy pode apenas adicionar a config
                 return
             }
 
             // ============================================================================
             // CENÁRIO 3: ROOT (FALLBACK ROBUSTO)
             // ============================================================================
-            // Se nada acima funcionou (ou se falhou), tentamos força bruta via Root.
+            // Se o método nativo falhar (comum em Android 10 sem permissão de sistema),
+            // tentamos força bruta via Root.
             val rootSuccess = connectViaRootRobust(ssid, password, security)
 
             if (rootSuccess) {
                 showToast(context, "Rede salva e conectando via Root!")
             } else {
-                showToast(context, "Falha ao conectar. Verifique Root ou senha.")
+                showToast(context, "Falha ao conectar. Tente conectar manualmente.")
             }
 
         } catch (e: Exception) {
@@ -96,7 +94,7 @@ class WifiConnectReceiver : BroadcastReceiver() {
         }
     }
 
-    // Abre o popup oficial "Deseja salvar esta rede?" (Android 10+)
+    // Abre o popup oficial "Deseja salvar esta rede?" (Android 11+)
     @SuppressLint("NewApi")
     private fun openSystemWifiDialog(context: Context, ssid: String, password: String, security: String) {
         try {
@@ -105,8 +103,7 @@ class WifiConnectReceiver : BroadcastReceiver() {
             if (security == "WPA" || security == "WPA2") {
                 builder.setWpa2Passphrase(password)
             } else if (security == "WEP") {
-                // Suggestions tem suporte limitado a WEP em algumas APIs, mas WPA é o padrão
-                builder.setWpa2Passphrase(password) // Tentativa genérica, ou ignore se API não suportar
+                builder.setWpa2Passphrase(password)
             }
             // Se for OPEN, não define senha.
 
@@ -127,7 +124,7 @@ class WifiConnectReceiver : BroadcastReceiver() {
         }
     }
 
-    // IMPLEMENTAÇÃO DO CÓDIGO DO COLABORADOR
+    // IMPLEMENTAÇÃO DO CÓDIGO DO COLABORADOR (Funcional em Android 10 e inferior)
     @Suppress("DEPRECATION")
     private fun connectLegacy(context: Context, ssid: String, password: String, security: String): Boolean {
         return try {
@@ -146,7 +143,6 @@ class WifiConnectReceiver : BroadcastReceiver() {
                     wifiConfig.allowedAuthAlgorithms.set(WifiConfiguration.AuthAlgorithm.OPEN)
                     wifiConfig.allowedAuthAlgorithms.set(WifiConfiguration.AuthAlgorithm.SHARED)
                     if (password.isNotEmpty()) {
-                        // WEP requer formato específico dependendo do tamanho, mas tentamos o padrão
                         wifiConfig.wepKeys[0] = "\"$password\""
                         wifiConfig.wepTxKeyIndex = 0
                     }
@@ -180,17 +176,16 @@ class WifiConnectReceiver : BroadcastReceiver() {
         val isOpen = (security == "OPEN")
 
         // --- ESTRATÉGIA A: CMD WIFI (Android 10+) ---
+        // Mesmo no Android 10, se o legado falhar, o cmd wifi pode funcionar via root
         if (isOpen) {
             commands.add("cmd wifi connect-network \"$ssid\" open")
             commands.add("cmd wifi connect \"$ssid\" open")
         } else {
-            // Assume WPA se não for open no cmd wifi simples
             commands.add("cmd wifi connect-network \"$ssid\" wpa2 \"$password\"")
             commands.add("cmd wifi connect \"$ssid\" \"$password\"")
         }
 
         // --- ESTRATÉGIA B: WPA_CLI (Legado robusto) ---
-        // Atualizado para usar a lógica de WEP/WPA/OPEN corretamente
         val wpaCmd = StringBuilder()
         wpaCmd.append("id=$(wpa_cli add_network | tail -n 1); ")
         wpaCmd.append("wpa_cli set_network \$id ssid '\"$ssid\"'; ")
