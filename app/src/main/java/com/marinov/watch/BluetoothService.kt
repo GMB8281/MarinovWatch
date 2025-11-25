@@ -931,9 +931,13 @@ class BluetoothService : Service() {
             val json = JSONObject(jsonString)
             val ssid = json.getString("ssid")
 
+            // Adiciona ID para poder cancelar
+            val notifId = WIFI_NOTIF_ID + (System.currentTimeMillis() % 100).toInt()
+
             val intent = Intent(this, WifiConnectReceiver::class.java).apply {
                 action = ACTION_CONNECT_WIFI
                 putExtra(EXTRA_WIFI_DATA, jsonString)
+                putExtra("notif_id", notifId)
             }
 
             val pendingIntent = PendingIntent.getBroadcast(
@@ -952,7 +956,7 @@ class BluetoothService : Service() {
                 .setContentIntent(pendingIntent)
                 .build()
 
-            notificationManager.notify(WIFI_NOTIF_ID, notification)
+            notificationManager.notify(notifId, notification)
 
         } catch (e: Exception) {
             Log.e(TAG, "Erro ao processar Wi-Fi recebido: ${e.message}")
