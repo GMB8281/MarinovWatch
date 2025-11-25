@@ -5,12 +5,15 @@ import android.app.NotificationManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.net.wifi.WifiConfiguration
+import android.net.wifi.WifiManager
 import android.net.wifi.WifiNetworkSuggestion
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.util.Log
 import android.widget.Toast
 import org.json.JSONObject
 import java.util.ArrayList
@@ -30,7 +33,7 @@ class WifiConnectReceiver : BroadcastReceiver() {
                 nm.cancel(notifId)
             }
 
-            // Executa em background
+            // Executa em background para não travar a UI com comandos Root
             val pendingResult = goAsync()
             Executors.newSingleThreadExecutor().execute {
                 try {
@@ -47,15 +50,31 @@ class WifiConnectReceiver : BroadcastReceiver() {
             val json = JSONObject(jsonString)
             val ssid = json.getString("ssid")
             val password = json.optString("password", "")
-            // Segurança simplificada: Se senha vazia -> OPEN, senão -> WPA
-            // (Ignora o campo 'security' vindo do JSON se necessário, ou usa como fallback)
-            val security = if (password.isEmpty()) "OPEN" else "WPA"
+            val security = json.optString("security", "WPA") // WPA, WEP, OPEN, SAE
+
+            val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+
+            // Garante que o Wi-Fi esteja ligado
+            if (!wifiManager.isWifiEnabled) {
+                wifiManager.isWifiEnabled = true
+                showToast(context, "Ativando Wi-Fi...")
+                Thread.sleep(2000) // Espera um pouco para o driver subir
+            }
 
             // --------------------------------------------------------------------------
-            // CENÁRIO 1: ANDROID 11+ (API 30+) -> USAR POPUP NATIVO "SALVAR REDE"
+            // TENTATIVA 1: VIA ROOT (A Preferida para "Salvar de Verdade")
+            // --------------------------------------------------------------------------
+            // O comando 'cmd wifi' existe no Android 10+ e salva/conecta a rede permanentemente.
+            if (connectViaRoot(ssid, password, security)) {
+                showToast(context, "Rede salva e conectada via Root!")
+                return
+            }
+
+            // --------------------------------------------------------------------------
+            // TENTATIVA 2: POPUP NATIVO (Android 11 / API 30+)
             // --------------------------------------------------------------------------
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                val suggestion = buildSuggestion(ssid, password)
+                val suggestion = buildSuggestion(ssid, password, security)
                 val bundle = Bundle()
                 val suggestionsList = ArrayList<WifiNetworkSuggestion>()
                 suggestionsList.add(suggestion)
@@ -66,19 +85,27 @@ class WifiConnectReceiver : BroadcastReceiver() {
                 settingsIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
                 context.startActivity(settingsIntent)
-                return
             }
-
             // --------------------------------------------------------------------------
-            // CENÁRIO 2: ANDROID 10 E INFERIORES -> FORÇAR VIA ROOT
+            // TENTATIVA 3: LEGADO / SUGESTÃO (Android 10 e inferiores sem Root)
             // --------------------------------------------------------------------------
-            // Nestas versões, addNetwork é bloqueado (Android 10) ou queremos garantir
-            // que salve de verdade sem interação (Android 9-).
+            else {
+                // No Android 10 sem root, infelizmente só temos Suggestion (não salva na lista visível até conectar)
+                // No Android 9-, usamos addNetwork que salva de verdade.
 
-            if (connectViaRoot(ssid, password)) {
-                showToast(context, "Conectado via Root!")
-            } else {
-                showToast(context, "Falha ao aplicar via Root. Verifique permissões.")
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    // Android 10 (Q) sem root -> Sugestão (Melhor que nada)
+                    val suggestion = buildSuggestion(ssid, password, security)
+                    val status = wifiManager.addNetworkSuggestions(listOf(suggestion))
+                    if (status == WifiManager.STATUS_NETWORK_SUGGESTIONS_SUCCESS) {
+                        showToast(context, "Rede sugerida ao sistema (Sem Root).")
+                    } else {
+                        showToast(context, "Erro ao sugerir rede.")
+                    }
+                } else {
+                    // Android 9 (Pie) e inferior -> addNetwork (Salva de verdade!)
+                    connectLegacy(wifiManager, ssid, password, security, context)
+                }
             }
 
         } catch (e: Exception) {
@@ -87,52 +114,78 @@ class WifiConnectReceiver : BroadcastReceiver() {
         }
     }
 
-    /**
-     * Tenta conectar usando sintaxes variadas do comando 'cmd wifi'.
-     * Esta é a maneira mais robusta de "Burlar" as restrições do Android 10.
-     */
-    private fun connectViaRoot(ssid: String, password: String): Boolean {
+    // Tenta conectar usando comandos de shell do Android
+    private fun connectViaRoot(ssid: String, password: String, security: String): Boolean {
         try {
-            // 1. Verifica acesso Root
-            if (Runtime.getRuntime().exec(arrayOf("su", "-c", "id")).waitFor() != 0) return false
+            // Verifica se tem su
+            val check = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
+            if (check.waitFor() != 0) return false
 
-            val commandsToTry = mutableListOf<String>()
+            // Android 10+ possui o comando 'cmd wifi'
+            // Sintaxe comum: cmd wifi connect <ssid> <password>
+            // Sintaxe alternativa: cmd wifi connect-network <ssid> <wpa2|open> <password>
 
-            if (password.isNotEmpty()) {
-                // Sintaxe Moderna (Android 10+): cmd wifi connect-network <ssid> <wpa2|open> <password>
-                commandsToTry.add("cmd wifi connect-network \"$ssid\" wpa2 \"$password\"")
-                // Sintaxe Alternativa
-                commandsToTry.add("cmd wifi connect \"$ssid\" \"$password\"")
-                // Sintaxe Legada (wpa_cli) - útil para Android 9 e inferior
-                commandsToTry.add("wpa_cli add_network && wpa_cli set_network 0 ssid '\"$ssid\"' && wpa_cli set_network 0 psk '\"$password\"' && wpa_cli enable_network 0 && wpa_cli save_config && wpa_cli reassociate")
+            val cmd: String = if (security == "OPEN" || password.isEmpty()) {
+                "cmd wifi connect \"$ssid\" open"
             } else {
-                // Rede Aberta
-                commandsToTry.add("cmd wifi connect-network \"$ssid\" open")
-                commandsToTry.add("cmd wifi connect \"$ssid\" open")
+                // Tenta sintaxe WPA2 padrão. Se falhar, tenta genérica.
+                "cmd wifi connect \"$ssid\" \"$password\""
             }
 
-            for (cmd in commandsToTry) {
-                try {
-                    val p = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
-                    val exitCode = p.waitFor()
-                    // Se o código de saída for 0, geralmente o comando foi aceito
-                    if (exitCode == 0) return true
-                } catch (e: Exception) {
-                    // Continua para o próximo comando
-                }
-            }
-            return false
+            val p = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
+            val exitCode = p.waitFor()
+
+            // Se o comando 'cmd wifi' não existir (Android antigo), vai falhar aqui e retornar false
+            // permitindo o fallback para o método legado (que funciona bem em Android antigo).
+            return exitCode == 0
 
         } catch (e: Exception) {
             return false
         }
     }
 
+    @Suppress("DEPRECATION")
+    private fun connectLegacy(wifiManager: WifiManager, ssid: String, password: String, security: String, context: Context) {
+        try {
+            val wifiConfig = WifiConfiguration()
+            wifiConfig.SSID = String.format("\"%s\"", ssid)
+
+            when (security) {
+                "WPA", "SAE" -> {
+                    wifiConfig.preSharedKey = String.format("\"%s\"", password)
+                }
+                "WEP" -> {
+                    wifiConfig.wepKeys[0] = String.format("\"%s\"", password)
+                    wifiConfig.wepTxKeyIndex = 0
+                    wifiConfig.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.NONE)
+                    wifiConfig.allowedGroupCiphers.set(WifiConfiguration.GroupCipher.WEP40)
+                }
+                "OPEN" -> {
+                    wifiConfig.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.NONE)
+                }
+            }
+
+            val netId = wifiManager.addNetwork(wifiConfig)
+            if (netId != -1) {
+                wifiManager.disconnect()
+                wifiManager.enableNetwork(netId, true)
+                wifiManager.reconnect()
+                showToast(context, "Salvando e conectando (Legado)...")
+            } else {
+                showToast(context, "Falha na API Legada.")
+            }
+        } catch (e: Exception) {
+            showToast(context, "Erro legado: ${e.message}")
+        }
+    }
+
     @SuppressLint("NewApi")
-    private fun buildSuggestion(ssid: String, password: String): WifiNetworkSuggestion {
+    private fun buildSuggestion(ssid: String, password: String, security: String): WifiNetworkSuggestion {
         val builder = WifiNetworkSuggestion.Builder().setSsid(ssid)
-        if (password.isNotEmpty()) {
-            builder.setWpa2Passphrase(password)
+        when (security) {
+            "WPA", "SAE" -> if (password.isNotEmpty()) builder.setWpa2Passphrase(password)
+            "WEP" -> if (password.isNotEmpty()) builder.setWpa2Passphrase(password) // Tentativa de compatibilidade
+            "OPEN" -> { }
         }
         return builder.build()
     }
