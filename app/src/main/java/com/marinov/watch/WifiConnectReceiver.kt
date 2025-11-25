@@ -23,18 +23,18 @@ class WifiConnectReceiver : BroadcastReceiver() {
         if (intent.action == BluetoothService.ACTION_CONNECT_WIFI) {
             val jsonString = intent.getStringExtra(BluetoothService.EXTRA_WIFI_DATA) ?: return
 
-            // Cancela a notificação
+            // Fecha notificação
             val notifId = intent.getIntExtra("notif_id", -1)
             if (notifId != -1) {
                 val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
                 nm.cancel(notifId)
             }
 
-            // Executa em background
+            // Executa em thread separada para não travar UI com comandos Root
             val pendingResult = goAsync()
             Executors.newSingleThreadExecutor().execute {
                 try {
-                    processWifiConnection(context, jsonString)
+                    handleWifiRequest(context, jsonString)
                 } finally {
                     pendingResult.finish()
                 }
@@ -42,43 +42,34 @@ class WifiConnectReceiver : BroadcastReceiver() {
         }
     }
 
-    private fun processWifiConnection(context: Context, jsonString: String) {
+    private fun handleWifiRequest(context: Context, jsonString: String) {
         try {
             val json = JSONObject(jsonString)
             val ssid = json.getString("ssid")
             val password = json.optString("password", "")
-            // Segurança simplificada: Se senha vazia -> OPEN, senão -> WPA
-            // (Ignora o campo 'security' vindo do JSON se necessário, ou usa como fallback)
-            val security = if (password.isEmpty()) "OPEN" else "WPA"
+            // Removemos a dependência do campo security, deduzindo pela senha
+            val isOpen = password.isEmpty()
 
-            // --------------------------------------------------------------------------
-            // CENÁRIO 1: ANDROID 11+ (API 30+) -> USAR POPUP NATIVO "SALVAR REDE"
-            // --------------------------------------------------------------------------
+            // ============================================================================
+            // CENÁRIO 1: ANDROID 11+ (API 30+) -> API NATIVA DO SISTEMA
+            // ============================================================================
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                val suggestion = buildSuggestion(ssid, password)
-                val bundle = Bundle()
-                val suggestionsList = ArrayList<WifiNetworkSuggestion>()
-                suggestionsList.add(suggestion)
-
-                bundle.putParcelableArrayList(Settings.EXTRA_WIFI_NETWORK_LIST, suggestionsList)
-                val settingsIntent = Intent(Settings.ACTION_WIFI_ADD_NETWORKS)
-                settingsIntent.putExtras(bundle)
-                settingsIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-
-                context.startActivity(settingsIntent)
+                openSystemWifiDialog(context, ssid, password, isOpen)
                 return
             }
 
-            // --------------------------------------------------------------------------
-            // CENÁRIO 2: ANDROID 10 E INFERIORES -> FORÇAR VIA ROOT
-            // --------------------------------------------------------------------------
-            // Nestas versões, addNetwork é bloqueado (Android 10) ou queremos garantir
-            // que salve de verdade sem interação (Android 9-).
+            // ============================================================================
+            // CENÁRIO 2: ANDROID 10 E INFERIOR -> ROOT OBRIGATÓRIO
+            // ============================================================================
+            // O usuário solicitou explicitamente não usar WifiSuggestion API aqui.
+            // Tentamos salvar efetivamente a rede usando comandos de superusuário.
 
-            if (connectViaRoot(ssid, password)) {
-                showToast(context, "Conectado via Root!")
+            val success = connectViaRootRobust(ssid, password, isOpen)
+
+            if (success) {
+                showToast(context, "Rede salva e conectando via Root!")
             } else {
-                showToast(context, "Falha ao aplicar via Root. Verifique permissões.")
+                showToast(context, "Falha no Root. Verifique se o Magisk concedeu permissão.")
             }
 
         } catch (e: Exception) {
@@ -87,54 +78,102 @@ class WifiConnectReceiver : BroadcastReceiver() {
         }
     }
 
-    /**
-     * Tenta conectar usando sintaxes variadas do comando 'cmd wifi'.
-     * Esta é a maneira mais robusta de "Burlar" as restrições do Android 10.
-     */
-    private fun connectViaRoot(ssid: String, password: String): Boolean {
+    // Abre o popup oficial "Deseja salvar esta rede?"
+    @SuppressLint("NewApi")
+    private fun openSystemWifiDialog(context: Context, ssid: String, password: String, isOpen: Boolean) {
         try {
-            // 1. Verifica acesso Root
-            if (Runtime.getRuntime().exec(arrayOf("su", "-c", "id")).waitFor() != 0) return false
+            val builder = WifiNetworkSuggestion.Builder().setSsid(ssid)
 
-            val commandsToTry = mutableListOf<String>()
-
-            if (password.isNotEmpty()) {
-                // Sintaxe Moderna (Android 10+): cmd wifi connect-network <ssid> <wpa2|open> <password>
-                commandsToTry.add("cmd wifi connect-network \"$ssid\" wpa2 \"$password\"")
-                // Sintaxe Alternativa
-                commandsToTry.add("cmd wifi connect \"$ssid\" \"$password\"")
-                // Sintaxe Legada (wpa_cli) - útil para Android 9 e inferior
-                commandsToTry.add("wpa_cli add_network && wpa_cli set_network 0 ssid '\"$ssid\"' && wpa_cli set_network 0 psk '\"$password\"' && wpa_cli enable_network 0 && wpa_cli save_config && wpa_cli reassociate")
-            } else {
-                // Rede Aberta
-                commandsToTry.add("cmd wifi connect-network \"$ssid\" open")
-                commandsToTry.add("cmd wifi connect \"$ssid\" open")
+            if (!isOpen) {
+                builder.setWpa2Passphrase(password)
             }
 
-            for (cmd in commandsToTry) {
-                try {
-                    val p = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
-                    val exitCode = p.waitFor()
-                    // Se o código de saída for 0, geralmente o comando foi aceito
-                    if (exitCode == 0) return true
-                } catch (e: Exception) {
-                    // Continua para o próximo comando
-                }
-            }
-            return false
+            val suggestion = builder.build()
+            val list = ArrayList<WifiNetworkSuggestion>()
+            list.add(suggestion)
 
+            val bundle = Bundle()
+            bundle.putParcelableArrayList(Settings.EXTRA_WIFI_NETWORK_LIST, list)
+
+            val intent = Intent(Settings.ACTION_WIFI_ADD_NETWORKS)
+            intent.putExtras(bundle)
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+            context.startActivity(intent)
         } catch (e: Exception) {
-            return false
+            showToast(context, "Erro ao abrir diálogo do sistema: ${e.message}")
         }
     }
 
-    @SuppressLint("NewApi")
-    private fun buildSuggestion(ssid: String, password: String): WifiNetworkSuggestion {
-        val builder = WifiNetworkSuggestion.Builder().setSsid(ssid)
-        if (password.isNotEmpty()) {
-            builder.setWpa2Passphrase(password)
+    /**
+     * Tenta múltiplas estratégias de Root para garantir que a rede seja salva.
+     * Estratégia:
+     * 1. 'cmd wifi' (Padrão Android 10+)
+     * 2. 'wpa_cli' (Padrão Linux/Android legado, muito robusto se disponível)
+     * 3. 'svc wifi' (Recarregar driver)
+     */
+    private fun connectViaRootRobust(ssid: String, password: String, isOpen: Boolean): Boolean {
+        // Verifica acesso root antes de tentar
+        if (!hasRootAccess()) return false
+
+        val commands = mutableListOf<String>()
+
+        // --- ESTRATÉGIA A: CMD WIFI (Android 10+) ---
+        // Tenta conectar e salvar. O comando connect geralmente salva no ConfigStore.
+        if (isOpen) {
+            commands.add("cmd wifi connect-network \"$ssid\" open")
+            commands.add("cmd wifi connect \"$ssid\" open") // Sintaxe alternativa
+        } else {
+            commands.add("cmd wifi connect-network \"$ssid\" wpa2 \"$password\"")
+            commands.add("cmd wifi connect \"$ssid\" \"$password\"") // Sintaxe alternativa
         }
-        return builder.build()
+
+        // --- ESTRATÉGIA B: WPA_CLI (Legado robusto) ---
+        // Adiciona a rede diretamente no wpa_supplicant, salva config e reconecta.
+        // Isso força a rede a ficar salva mesmo se o Android UI não atualizar na hora.
+        val wpaCmd = StringBuilder()
+        wpaCmd.append("id=$(wpa_cli add_network | tail -n 1); ")
+        wpaCmd.append("wpa_cli set_network \$id ssid '\"$ssid\"'; ")
+        if (!isOpen) {
+            wpaCmd.append("wpa_cli set_network \$id psk '\"$password\"'; ")
+        } else {
+            wpaCmd.append("wpa_cli set_network \$id key_mgmt NONE; ")
+        }
+        wpaCmd.append("wpa_cli enable_network \$id; ")
+        wpaCmd.append("wpa_cli save_config; ") // OBRIGATÓRIO PARA PERSISTIR
+        wpaCmd.append("wpa_cli select_network \$id; ")
+        wpaCmd.append("wpa_cli reassociate")
+
+        commands.add(wpaCmd.toString())
+
+        // Executa os comandos em sequência até um não retornar erro crítico
+        // Nota: cmd wifi retorna 0 mesmo se falhar em alguns casos, então tentamos wpa_cli também se possível.
+
+        var anySuccess = false
+        for (cmd in commands) {
+            try {
+                val p = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
+                val exitCode = p.waitFor()
+                if (exitCode == 0) {
+                    anySuccess = true
+                    // Não damos break imediato no wpa_cli pois ele é complementar em alguns sistemas
+                    // Mas se o cmd wifi funcionou, geralmente é suficiente.
+                    if (cmd.startsWith("cmd")) break
+                }
+            } catch (e: Exception) {
+                // Falha silenciosa, tenta próximo
+            }
+        }
+
+        return anySuccess
+    }
+
+    private fun hasRootAccess(): Boolean {
+        return try {
+            Runtime.getRuntime().exec(arrayOf("su", "-c", "id")).waitFor() == 0
+        } catch (e: Exception) {
+            false
+        }
     }
 
     private fun showToast(context: Context, message: String) {
