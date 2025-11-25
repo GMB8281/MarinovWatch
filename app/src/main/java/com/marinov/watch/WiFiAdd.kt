@@ -12,7 +12,6 @@ import android.os.IBinder
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.widget.EditText
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
@@ -21,7 +20,6 @@ import androidx.appcompat.widget.Toolbar
 import androidx.core.app.ActivityCompat
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
-import com.google.android.material.floatingactionbutton.FloatingActionButton
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -29,6 +27,7 @@ import kotlinx.coroutines.withContext
 import java.io.BufferedReader
 import java.io.InputStreamReader
 
+// Data class para segurar os dados extraídos via Root
 data class RootWifiConfig(
     val ssid: String,
     val psk: String,
@@ -38,7 +37,6 @@ data class RootWifiConfig(
 class WiFiAdd : AppCompatActivity() {
 
     private lateinit var recyclerView: RecyclerView
-    private lateinit var fabAddManual: FloatingActionButton
     private var bluetoothService: BluetoothService? = null
     private var isBound = false
 
@@ -58,9 +56,36 @@ class WiFiAdd : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_wifi_add)
 
-        initUI()
-        // Tenta scanear automaticamente ao abrir
-        checkRootAndScan()
+        // Verificação inicial
+        checkRootAndStart()
+    }
+
+    private fun checkRootAndStart() {
+        CoroutineScope(Dispatchers.IO).launch {
+            val hasRoot = checkRoot()
+            withContext(Dispatchers.Main) {
+                if (!hasRoot) {
+                    AlertDialog.Builder(this@WiFiAdd)
+                        .setTitle("Acesso Negado")
+                        .setMessage("Este recurso requer acesso ROOT. Em versões modernas do Android, é impossível listar senhas de Wi-Fi salvas sem privilégios elevados.")
+                        .setPositiveButton("Fechar") { _, _ -> finish() }
+                        .setCancelable(false)
+                        .show()
+                } else {
+                    initUI()
+                }
+            }
+        }
+    }
+
+    private fun checkRoot(): Boolean {
+        return try {
+            val process = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
+            val result = process.waitFor()
+            result == 0
+        } catch (_: Exception) {
+            false
+        }
     }
 
     private fun initUI() {
@@ -72,92 +97,50 @@ class WiFiAdd : AppCompatActivity() {
         recyclerView = findViewById(R.id.recyclerViewWifi)
         recyclerView.layoutManager = LinearLayoutManager(this)
 
-        fabAddManual = findViewById(R.id.fabAddManual)
-        fabAddManual.setOnClickListener { showManualAddDialog() }
-
         val intent = Intent(this, BluetoothService::class.java)
         bindService(intent, connection, Context.BIND_AUTO_CREATE)
+
+        loadWifiNetworks()
     }
 
-    private fun checkRootAndScan() {
+    @SuppressLint("MissingPermission")
+    private fun loadWifiNetworks() {
+        // Exibe Loading? (Opcional, aqui vamos direto)
+
         CoroutineScope(Dispatchers.IO).launch {
-            val hasRoot = checkRoot()
-            withContext(Dispatchers.Main) {
-                if (!hasRoot) {
-                    Toast.makeText(this@WiFiAdd, "Root não detectado. Use o botão (+) para adicionar manualmente.", Toast.LENGTH_LONG).show()
-                    findViewById<TextView>(R.id.tvEmptyState).apply {
-                        visibility = View.VISIBLE
-                        text = "Sem acesso Root.\nAdicione manualmente pelo botão (+)."
-                    }
-                } else {
-                    loadWifiNetworksRoot()
-                }
-            }
-        }
-    }
-
-    private fun checkRoot(): Boolean {
-        return try {
-            val process = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
-            process.waitFor() == 0
-        } catch (_: Exception) { false }
-    }
-
-    private fun loadWifiNetworksRoot() {
-        CoroutineScope(Dispatchers.IO).launch {
+            // Lista para armazenar redes encontradas via ROOT
             val rootNetworks = RootWifiScanner.scanAllWifiConfigs()
 
             withContext(Dispatchers.Main) {
                 if (rootNetworks.isEmpty()) {
                     findViewById<TextView>(R.id.tvEmptyState).apply {
                         visibility = View.VISIBLE
-                        text = "Nenhuma rede encontrada via Root.\n(Tente o botão +)"
+                        text = "Nenhuma rede encontrada nos arquivos do sistema (Root)."
                     }
                 } else {
                     findViewById<TextView>(R.id.tvEmptyState).visibility = View.GONE
                     recyclerView.adapter = WifiAdapter(rootNetworks) { config ->
-                        confirmSendWifi(config.ssid, config.psk, config.security)
+                        confirmSendWifi(config)
                     }
-                    Toast.makeText(this@WiFiAdd, "${rootNetworks.size} redes encontradas!", Toast.LENGTH_SHORT).show()
                 }
             }
         }
     }
 
-    private fun showManualAddDialog() {
-        val view = LayoutInflater.from(this).inflate(R.layout.dialog_manual_wifi, null)
-        val etSsid = view.findViewById<EditText>(R.id.etSsid)
-        val etPassword = view.findViewById<EditText>(R.id.etPassword)
-
+    private fun confirmSendWifi(config: RootWifiConfig) {
         AlertDialog.Builder(this)
-            .setTitle("Adicionar Wi-Fi Manualmente")
-            .setView(view)
-            .setPositiveButton("Enviar") { _, _ ->
-                val ssid = etSsid.text.toString()
-                val pass = etPassword.text.toString()
-                if (ssid.isNotEmpty()) {
-                    confirmSendWifi(ssid, pass, "WPA")
-                }
-            }
-            .setNegativeButton("Cancelar", null)
-            .show()
-    }
-
-    private fun confirmSendWifi(ssid: String, pass: String, security: String) {
-        val msg = if (pass.isEmpty()) "Enviar rede aberta '$ssid'?" else "Enviar rede '$ssid' e sua senha?"
-
-        AlertDialog.Builder(this)
-            .setTitle("Enviar para Watch")
-            .setMessage(msg)
+            .setTitle("Enviar Wi-Fi?")
+            .setMessage("Deseja enviar a rede '${config.ssid}' para o smartwatch?")
             .setPositiveButton("Sim") { _, _ ->
                 if (bluetoothService?.isConnected == true) {
-                    bluetoothService?.sendWifiData(ssid, pass, security)
-                    Toast.makeText(this, "Enviado!", Toast.LENGTH_SHORT).show()
+                    // Chama o método no BluetoothService
+                    bluetoothService?.sendWifiData(config.ssid, config.psk, config.security)
+                    Toast.makeText(this, "Enviando...", Toast.LENGTH_SHORT).show()
                 } else {
-                    Toast.makeText(this, "Watch desconectado.", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "Watch não conectado.", Toast.LENGTH_SHORT).show()
                 }
             }
-            .setNegativeButton("Cancelar", null)
+            .setNegativeButton("Não", null)
             .show()
     }
 
@@ -167,16 +150,17 @@ class WiFiAdd : AppCompatActivity() {
     }
 
     // ========================================================================
-    // SCANNER ROOT (ATUALIZADO PARA ANDROID 14/15/16)
+    // SCANNER ROOT ROBUSTO (Compatível com Android 8, 9, 10, 11, 12, 13, 14)
     // ========================================================================
     object RootWifiScanner {
 
+        // Caminhos possíveis para o arquivo de configuração de Wi-Fi
         private val CONF_PATHS = listOf(
-            // Caminho Padrão Moderno (Android 11 até 16+)
+            // Android 11+ (Project Mainline / Apex)
             "/data/misc/apexdata/com.android.wifi/WifiConfigStore.xml",
-            // Caminho Intermediário
+            // Android 8.0 até 10
             "/data/misc/wifi/WifiConfigStore.xml",
-            // Caminho Legado
+            // Android 7.1 e inferior (Legacy)
             "/data/misc/wifi/wpa_supplicant.conf"
         )
 
@@ -184,23 +168,31 @@ class WiFiAdd : AppCompatActivity() {
             val networks = mutableListOf<RootWifiConfig>()
 
             for (path in CONF_PATHS) {
-                // Tenta ler o arquivo diretamente
-                val content = readFile(path)
-                if (content.isNotEmpty()) {
+                if (fileExists(path)) {
+                    val content = readFile(path)
                     if (path.endsWith(".xml")) {
                         networks.addAll(parseWifiConfigStoreXml(content))
                     } else {
                         networks.addAll(parseWpaSupplicant(content))
                     }
+                    // Se achamos redes em um arquivo prioritário, paramos (evita duplicatas de backups antigos)
                     if (networks.isNotEmpty()) break
                 }
             }
+
+            // Remove duplicatas e ordena
             return networks.distinctBy { it.ssid }.sortedBy { it.ssid }
+        }
+
+        private fun fileExists(path: String): Boolean {
+            return try {
+                val p = Runtime.getRuntime().exec(arrayOf("su", "-c", "ls \"$path\""))
+                p.waitFor() == 0
+            } catch (e: Exception) { false }
         }
 
         private fun readFile(path: String): String {
             return try {
-                // Usa 'cat' via su
                 val p = Runtime.getRuntime().exec(arrayOf("su", "-c", "cat \"$path\""))
                 val sb = StringBuilder()
                 val reader = BufferedReader(InputStreamReader(p.inputStream))
@@ -212,45 +204,57 @@ class WiFiAdd : AppCompatActivity() {
             } catch (e: Exception) { "" }
         }
 
+        // Parser para o formato XML do Android moderno (WifiConfigStore.xml)
+        // O formato geralmente é:
+        // <Network>
+        //    <WifiConfiguration>
+        //       <string name="SSID">"NomeDaRede"</string>
+        //       <string name="PreSharedKey">"Senha123"</string>
+        //    </WifiConfiguration>
+        // </Network>
         private fun parseWifiConfigStoreXml(xml: String): List<RootWifiConfig> {
             val list = mutableListOf<RootWifiConfig>()
+
+            // Regex simples para capturar blocos WifiConfiguration (funciona para a maioria dos casos simples)
+            // Uma solução XML parser completa seria muito pesada para shell output sujo
             try {
-                // Regex melhorado para capturar SSID e PSK
-                // O formato pode variar entre &quot;TEXTO&quot; ou apenas "TEXTO"
-                val blockRegex = Regex("<WifiConfiguration>.*?</WifiConfiguration>", RegexOption.DOT_MATCHES_ALL)
-                val blocks = blockRegex.findAll(xml)
+                // Divide por blocos de configuração
+                val blocks = xml.split("<WifiConfiguration>")
 
-                for (match in blocks) {
-                    val block = match.value
+                for (block in blocks) {
+                    if (!block.contains("SSID")) continue
 
-                    // Extrai SSID
                     val ssidMatch = Regex("<string name=\"SSID\">&quot;(.*?)&quot;</string>").find(block)
-                        ?: Regex("<string name=\"SSID\">(.*?)</string>").find(block)
+                    val pskMatch = Regex("<string name=\"PreSharedKey\">&quot;(.*?)&quot;</string>").find(block)
+
+                    // As vezes a senha está em formato diferente ou é null (rede aberta)
+                    // Se não tiver PreSharedKey com aspas, pode ser null (Open)
 
                     if (ssidMatch != null) {
-                        var ssid = ssidMatch.groupValues[1]
-                        // Limpeza extra caso venha com aspas escapadas
-                        ssid = ssid.replace("&quot;", "")
+                        val ssid = ssidMatch.groupValues[1]
+                        val psk = pskMatch?.groupValues?.get(1) ?: ""
 
-                        // Extrai Senha (PreSharedKey)
-                        val pskMatch = Regex("<string name=\"PreSharedKey\">&quot;(.*?)&quot;</string>").find(block)
-                            ?: Regex("<string name=\"PreSharedKey\">(.*?)</string>").find(block)
-
-                        var psk = pskMatch?.groupValues?.get(1) ?: ""
-                        psk = psk.replace("&quot;", "")
-
+                        // Ignora redes sem nome
                         if (ssid.isNotEmpty()) {
                             list.add(RootWifiConfig(ssid, psk, if (psk.isEmpty()) "OPEN" else "WPA"))
                         }
                     }
                 }
-            } catch (e: Exception) { e.printStackTrace() }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
             return list
         }
 
+        // Parser para o formato legado (wpa_supplicant.conf)
+        // network={
+        //    ssid="Nome"
+        //    psk="Senha"
+        // }
         private fun parseWpaSupplicant(conf: String): List<RootWifiConfig> {
             val list = mutableListOf<RootWifiConfig>()
             val networks = conf.split("network={")
+
             for (net in networks) {
                 val ssidLine = net.lines().find { it.trim().startsWith("ssid=") }
                 val pskLine = net.lines().find { it.trim().startsWith("psk=") }
@@ -258,7 +262,10 @@ class WiFiAdd : AppCompatActivity() {
                 if (ssidLine != null) {
                     val ssid = ssidLine.substringAfter("=").trim().replace("\"", "")
                     val psk = pskLine?.substringAfter("=")?.trim()?.replace("\"", "") ?: ""
-                    if (ssid.isNotEmpty()) list.add(RootWifiConfig(ssid, psk))
+
+                    if (ssid.isNotEmpty()) {
+                        list.add(RootWifiConfig(ssid, psk, if (psk.isEmpty()) "OPEN" else "WPA"))
+                    }
                 }
             }
             return list
@@ -270,19 +277,24 @@ class WiFiAdd : AppCompatActivity() {
         private val list: List<RootWifiConfig>,
         private val onClick: (RootWifiConfig) -> Unit
     ) : RecyclerView.Adapter<WifiAdapter.Holder>() {
+
         inner class Holder(itemView: View) : RecyclerView.ViewHolder(itemView) {
             val tvSsid: TextView = itemView.findViewById(R.id.tvWifiSsid)
             val root: View = itemView
         }
+
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder {
-            val view = LayoutInflater.from(parent.context).inflate(R.layout.item_wifi_network, parent, false)
+            val view = LayoutInflater.from(parent.context)
+                .inflate(R.layout.item_wifi_network, parent, false)
             return Holder(view)
         }
+
         override fun onBindViewHolder(holder: Holder, position: Int) {
             val item = list[position]
             holder.tvSsid.text = item.ssid
             holder.root.setOnClickListener { onClick(item) }
         }
+
         override fun getItemCount() = list.size
     }
 }

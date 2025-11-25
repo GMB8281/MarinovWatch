@@ -47,7 +47,7 @@
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="Toque em uma rede para compartilhar ou use o botão (+) para adicionar manualmente."
+                android:text="Selecione uma rede salva para compartilhar com o Watch."
                 android:padding="20dp"
                 android:textAppearance="@style/TextAppearance.Material3.BodyMedium"
                 android:textColor="?android:attr/textColorSecondary"/>
@@ -56,7 +56,7 @@
                 android:id="@+id/tvEmptyState"
                 android:layout_width="match_parent"
                 android:layout_height="100dp"
-                android:text="Carregando..."
+                android:text="Nenhuma rede salva encontrada."
                 android:gravity="center"
                 android:visibility="gone"
                 android:textColor="?android:attr/textColorSecondary"/>
@@ -65,21 +65,7 @@
                 android:id="@+id/recyclerViewWifi"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:nestedScrollingEnabled="false"
-                android:paddingBottom="80dp"/> <!-- Padding para o FAB -->
+                android:nestedScrollingEnabled="false"/>
         </LinearLayout>
     </androidx.core.widget.NestedScrollView>
-
-    <!-- Botão Adicionar Manual -->
-    <com.google.android.material.floatingactionbutton.FloatingActionButton
-        android:id="@+id/fabAddManual"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="bottom|end"
-        android:layout_margin="16dp"
-        android:src="@android:drawable/ic_input_add"
-        app:backgroundTint="?attr/colorPrimaryContainer"
-        app:tint="?attr/colorOnPrimaryContainer"
-        android:contentDescription="Adicionar Manualmente"/>
-
 </androidx.coordinatorlayout.widget.CoordinatorLayout>
