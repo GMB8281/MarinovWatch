@@ -57,8 +57,7 @@ class WelcomeActivity : AppCompatActivity() {
         val cardSmartphone = findViewById<MaterialCardView>(R.id.cardSmartphone)
         val cardWatch = findViewById<MaterialCardView>(R.id.cardWatch)
 
-        // AGORA AMBOS OS FLUXOS PASSAM PELA VERIFICAÇÃO DE ROOT
-        // Isso garante que o Smartphone consiga ler senhas de Wi-Fi
+        // SOLICITA ROOT PARA AMBOS, COMO PEDIDO
         cardSmartphone.setOnClickListener {
             pendingDeviceType = "PHONE"
             checkRootAndSetup()
@@ -96,22 +95,19 @@ class WelcomeActivity : AppCompatActivity() {
 
     private fun checkRootAndSetup() {
         lifecycleScope.launch(Dispatchers.IO) {
-            // Tenta obter root. Se falhar, continuamos mesmo assim,
-            // mas algumas features (como ler senha de wifi) podem não funcionar.
+            // Verifica Root
             val hasRoot = checkRootAccess()
 
             withContext(Dispatchers.Main) {
-                if (!hasRoot && pendingDeviceType == "PHONE") {
-                    // Aviso opcional para o usuário do telefone
-                    // (Poderíamos mostrar um Toast aqui, mas vamos prosseguir para instalação)
-                }
+                // Se for Smartphone e não tiver root, podemos avisar, mas prosseguimos para instalação
+                // O recurso de Wi-Fi só funcionará se tiver Root
                 requestInstallPermission()
             }
         }
     }
 
     private fun requestInstallPermission() {
-        if (true && !packageManager.canRequestPackageInstalls()) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
             val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
             intent.data = "package:$packageName".toUri()
             installPermissionLauncher.launch(intent)
@@ -133,6 +129,7 @@ class WelcomeActivity : AppCompatActivity() {
     private suspend fun checkRootAccess(): Boolean {
         return withContext(Dispatchers.IO) {
             try {
+                // Executa um comando simples de root para testar e já conceder a permissão no Magisk/KernelSU
                 val process = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
                 val result = process.waitFor()
                 result == 0

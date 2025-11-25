@@ -1051,9 +1051,11 @@ class BluetoothService : Service() {
         notificationManager.createNotificationChannel(NotificationChannel(MIRRORED_CHANNEL_ID, "Notificações do celular", NotificationManager.IMPORTANCE_HIGH))
 
         // Novo canal Wi-Fi
-        notificationManager.createNotificationChannel(
-            NotificationChannel(WIFI_CHANNEL_ID, "Sincronização Wi-Fi", NotificationManager.IMPORTANCE_HIGH)
-        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            notificationManager.createNotificationChannel(
+                NotificationChannel(WIFI_CHANNEL_ID, "Sincronização Wi-Fi", NotificationManager.IMPORTANCE_HIGH)
+            )
+        }
     }
 
     private fun savePreference(key: String, value: String) {
