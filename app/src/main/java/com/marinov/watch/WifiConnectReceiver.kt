@@ -25,12 +25,14 @@ class WifiConnectReceiver : BroadcastReceiver() {
         if (intent.action == BluetoothService.ACTION_CONNECT_WIFI) {
             val jsonString = intent.getStringExtra(BluetoothService.EXTRA_WIFI_DATA) ?: return
 
+            // Fecha notificação
             val notifId = intent.getIntExtra("notif_id", -1)
             if (notifId != -1) {
                 val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
                 nm.cancel(notifId)
             }
 
+            // Executa em thread separada para não travar UI com comandos Root
             val pendingResult = goAsync()
             Executors.newSingleThreadExecutor().execute {
                 try {
@@ -58,25 +60,25 @@ class WifiConnectReceiver : BroadcastReceiver() {
             }
 
             // ============================================================================
-            // CENÁRIO 2: ANDROID 10 E INFERIOR -> TENTATIVA "LEGACY" (Lógica do Colaborador)
+            // CENÁRIO 2: ANDROID 10 E INFERIOR -> TENTATIVA "LEGACY"
             // ============================================================================
+            // Tenta o método nativo antigo. Se funcionar, ótimo.
             val legacySuccess = connectLegacy(context, ssid, password, security)
             if (legacySuccess) {
-                showToast(context, "Conexão nativa iniciada!")
+                showToast(context, "Conectado via Método Nativo!")
                 return
             }
 
             // ============================================================================
-            // CENÁRIO 3: ROOT (FALLBACK NUCLEAR)
+            // CENÁRIO 3: ROOT (FALLBACK ROBUSTO)
             // ============================================================================
-            // Se chegou aqui, a API nativa falhou (comum no Android 10).
-            // Usamos Root para forçar a gravação no arquivo de configuração e reiniciar o WiFi.
+            // Se chegou aqui, usamos força bruta via Root.
             val rootSuccess = connectViaRootRobust(ssid, password, security)
 
             if (rootSuccess) {
-                showToast(context, "Configuração Root aplicada. O Wi-Fi irá reiniciar.")
+                showToast(context, "Comando Root enviado! Verifique o Wi-Fi.")
             } else {
-                showToast(context, "Falha total. Tente adicionar manualmente.")
+                showToast(context, "Falha ao conectar via Root. Tente manualmente.")
             }
 
         } catch (e: Exception) {
@@ -85,6 +87,7 @@ class WifiConnectReceiver : BroadcastReceiver() {
         }
     }
 
+    // Abre o popup oficial "Deseja salvar esta rede?" (Android 11+)
     @SuppressLint("NewApi")
     private fun openSystemWifiDialog(context: Context, ssid: String, password: String, security: String) {
         try {
@@ -118,12 +121,12 @@ class WifiConnectReceiver : BroadcastReceiver() {
         return try {
             val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
             val wifiConfig = WifiConfiguration()
-
-            // As aspas são cruciais, conforme lógica do colaborador
             wifiConfig.SSID = "\"$ssid\""
 
             when (security) {
-                "OPEN" -> wifiConfig.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.NONE)
+                "OPEN" -> {
+                    wifiConfig.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.NONE)
+                }
                 "WEP" -> {
                     wifiConfig.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.NONE)
                     wifiConfig.allowedAuthAlgorithms.set(WifiConfiguration.AuthAlgorithm.OPEN)
@@ -142,63 +145,64 @@ class WifiConnectReceiver : BroadcastReceiver() {
             val netId = wifiManager.addNetwork(wifiConfig)
             if (netId == -1) return false
 
-            // Lógica exata do colaborador: Disconnect -> Enable -> Reconnect
             wifiManager.disconnect()
-            wifiManager.enableNetwork(netId, true)
+            val enabled = wifiManager.enableNetwork(netId, true)
             wifiManager.reconnect()
 
-            // Tenta salvar explicitamente (necessário em alguns Androids antigos)
-            wifiManager.saveConfiguration()
-
-            true
+            enabled
         } catch (e: Exception) {
             false
         }
     }
 
     /**
-     * Estratégia de Root Agressiva e Abrangente
+     * Estratégia de Root Agressiva
+     * Tenta 3 métodos: CMD WIFI -> WPA_CLI -> INJEÇÃO DIRETA EM ARQUIVO
      */
     private fun connectViaRootRobust(ssid: String, password: String, security: String): Boolean {
+        // Removemos a verificação prévia 'hasRootAccess()' para evitar overhead e
+        // permitir que o fluxo siga direto para os comandos 'su'.
+        // Se o su falhar, o exitCode será != 0 e o loop continua.
+
         val commands = mutableListOf<String>()
         val isOpen = (security == "OPEN")
         val isWep = (security == "WEP")
 
-        // 1. CMD WIFI (Sintaxe Android 10+)
-        // Adicionada sintaxe simplificada 'connect' que às vezes funciona melhor que 'connect-network'
+        // --- MÉTODO 1: CMD WIFI (Android 10+) ---
         if (isOpen) {
             commands.add("cmd wifi connect-network \"$ssid\" open")
-            commands.add("cmd wifi connect \"$ssid\" open")
+        } else if (isWep) {
+            commands.add("cmd wifi connect-network \"$ssid\" wep \"$password\"")
         } else {
             commands.add("cmd wifi connect-network \"$ssid\" wpa2 \"$password\"")
-            commands.add("cmd wifi connect \"$ssid\" \"$password\"")
         }
 
-        // 2. WPA_CLI (Várias tentativas de interface)
-        val wpaInterfaces = listOf("wlan0", "swlan0", "tiwlan0")
-        for (iface in wpaInterfaces) {
-            val wpaCmd = StringBuilder()
-            wpaCmd.append("id=$(wpa_cli -i $iface add_network | tail -n 1); ")
-            wpaCmd.append("wpa_cli -i $iface set_network \$id ssid '\"$ssid\"'; ")
-            if (isOpen) {
-                wpaCmd.append("wpa_cli -i $iface set_network \$id key_mgmt NONE; ")
-            } else {
-                wpaCmd.append("wpa_cli -i $iface set_network \$id psk '\"$password\"'; ")
+        // --- MÉTODO 2: WPA_CLI (Legado Robusto) ---
+        // Tenta detectar interface, se falhar, tenta wlan0
+        val wpaCmd = StringBuilder()
+        wpaCmd.append("iface=wlan0; ") // Assume wlan0 como padrão seguro
+        wpaCmd.append("id=$(wpa_cli -i \$iface add_network | tail -n 1); ")
+        wpaCmd.append("wpa_cli -i \$iface set_network \$id ssid '\"$ssid\"'; ")
+
+        when {
+            isOpen -> wpaCmd.append("wpa_cli -i \$iface set_network \$id key_mgmt NONE; ")
+            isWep -> {
+                wpaCmd.append("wpa_cli -i \$iface set_network \$id key_mgmt NONE; ")
+                wpaCmd.append("wpa_cli -i \$iface set_network \$id wep_key0 '\"$password\"'; ")
             }
-            wpaCmd.append("wpa_cli -i $iface enable_network \$id; ")
-            wpaCmd.append("wpa_cli -i $iface save_config; ")
-            wpaCmd.append("wpa_cli -i $iface select_network \$id")
-            commands.add(wpaCmd.toString())
+            else -> wpaCmd.append("wpa_cli -i \$iface set_network \$id psk '\"$password\"'; ")
         }
 
-        // 3. INJEÇÃO DIRETA "NUCLEAR" (Se não salvar, escrevemos direto no arquivo)
-        // Tentamos escrever em TODOS os caminhos possíveis onde o Android costuma guardar configurações
-        val possiblePaths = listOf(
-            "/data/misc/wifi/wpa_supplicant.conf",
-            "/data/vendor/wifi/wpa/wpa_supplicant.conf",
-            "/vendor/etc/wifi/wpa_supplicant.conf"
-        )
+        wpaCmd.append("wpa_cli -i \$iface enable_network \$id; ")
+        wpaCmd.append("wpa_cli -i \$iface select_network \$id; ")
+        wpaCmd.append("wpa_cli -i \$iface save_config; ")
+        wpaCmd.append("wpa_cli -i \$iface reassociate")
 
+        commands.add(wpaCmd.toString())
+
+        // --- MÉTODO 3: INJEÇÃO DIRETA (O "Nuclear") ---
+        // Escreve direto no wpa_supplicant.conf e reinicia o Wi-Fi.
+        // Isso resolve casos onde wpa_cli e cmd wifi não têm permissão de socket.
         val confEntry = StringBuilder()
         confEntry.append("\\nnetwork={\\n")
         confEntry.append("    ssid=\\\"$ssid\\\"\\n")
@@ -211,30 +215,28 @@ class WifiConnectReceiver : BroadcastReceiver() {
             confEntry.append("    psk=\\\"$password\\\"\\n")
             confEntry.append("    key_mgmt=WPA-PSK\\n")
         }
-        confEntry.append("    priority=100\\n") // Alta prioridade
         confEntry.append("}\\n")
 
-        // Cria um comando gigante que tenta dar append em cada arquivo se ele existir
-        val injectCmds = possiblePaths.map { path ->
-            "if [ -f \"$path\" ]; then echo -e \"$confEntry\" >> \"$path\"; fi"
-        }.joinToString(";")
-
-        // Adiciona o comando de injeção seguido de restart do serviço wifi para recarregar configs
-        commands.add("$injectCmds; svc wifi disable; sleep 3; svc wifi enable")
+        val injectCmd = "echo -e \"$confEntry\" >> /data/misc/wifi/wpa_supplicant.conf; svc wifi disable; sleep 2; svc wifi enable"
+        commands.add(injectCmd)
 
         var anyCommandWorked = false
 
         for (cmd in commands) {
             try {
+                // Executa o comando e espera. Se o usuário precisar dar permissão no prompt do Magisk,
+                // o waitFor() vai segurar a execução até ele responder.
                 val p = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
                 val exitCode = p.waitFor()
+
                 if (exitCode == 0) {
                     anyCommandWorked = true
-                    // Se o cmd wifi funcionou, paramos. Se for wpa_cli ou injeção, continuamos
-                    // para garantir que o restart final (svc wifi) ocorra.
-                    if (cmd.startsWith("cmd")) break
+                    // Se funcionou via CMD ou WPA_CLI, paramos.
+                    // Se for injeção (último), ele já rodou.
+                    if (cmd.startsWith("cmd") || cmd.startsWith("iface")) break
                 }
             } catch (e: Exception) {
+                // Tenta o próximo método silenciosamente
             }
         }
 
