@@ -9,10 +9,7 @@ import android.os.IBinder
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.widget.AdapterView
-import android.widget.ArrayAdapter
 import android.widget.EditText
-import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
@@ -21,7 +18,6 @@ import androidx.appcompat.widget.Toolbar
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.floatingactionbutton.FloatingActionButton
-import com.google.android.material.textfield.TextInputLayout
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -32,7 +28,7 @@ import java.io.InputStreamReader
 data class RootWifiConfig(
     val ssid: String,
     val psk: String,
-    val security: String = "WPA" // WPA, WEP, OPEN, SAE
+    val security: String = "WPA"
 )
 
 class WiFiAdd : AppCompatActivity() {
@@ -123,29 +119,11 @@ class WiFiAdd : AppCompatActivity() {
         }
     }
 
+    // DIÁLOGO SIMPLIFICADO: Sem Spinner de Criptografia
     private fun showManualAddDialog() {
         val view = LayoutInflater.from(this).inflate(R.layout.dialog_manual_wifi, null)
         val etSsid = view.findViewById<EditText>(R.id.etSsid)
         val etPassword = view.findViewById<EditText>(R.id.etPassword)
-        val layoutPassword = view.findViewById<TextInputLayout>(R.id.layoutPassword)
-        val spinner = view.findViewById<Spinner>(R.id.spinnerSecurity)
-
-        // Opções de Segurança
-        val securityOptions = listOf("WPA/WPA2 (Padrão)", "WPA3 (SAE)", "WEP", "Nenhuma (Aberta)")
-        // Valores internos para enviar ao Watch
-        val securityValues = listOf("WPA", "SAE", "WEP", "OPEN")
-
-        val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, securityOptions)
-        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-        spinner.adapter = adapter
-
-        // Oculta campo de senha se for Aberta
-        spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                layoutPassword.visibility = if (securityValues[position] == "OPEN") View.GONE else View.VISIBLE
-            }
-            override fun onNothingSelected(parent: AdapterView<*>?) {}
-        }
 
         AlertDialog.Builder(this)
             .setTitle("Adicionar Wi-Fi Manualmente")
@@ -153,12 +131,11 @@ class WiFiAdd : AppCompatActivity() {
             .setPositiveButton("Enviar") { _, _ ->
                 val ssid = etSsid.text.toString()
                 val pass = etPassword.text.toString()
-                val security = securityValues[spinner.selectedItemPosition]
 
                 if (ssid.isNotEmpty()) {
-                    // Se for aberta, ignora o que estiver no campo senha
-                    val finalPass = if (security == "OPEN") "" else pass
-                    confirmSendWifi(ssid, finalPass, security)
+                    // Lógica automática: Senha vazia = OPEN, Senha preenchida = WPA
+                    val security = if (pass.isEmpty()) "OPEN" else "WPA"
+                    confirmSendWifi(ssid, pass, security)
                 }
             }
             .setNegativeButton("Cancelar", null)
@@ -166,7 +143,7 @@ class WiFiAdd : AppCompatActivity() {
     }
 
     private fun confirmSendWifi(ssid: String, pass: String, security: String) {
-        val msg = if (security == "OPEN") "Enviar rede aberta '$ssid'?" else "Enviar rede '$ssid' ($security)?"
+        val msg = if (security == "OPEN") "Enviar rede aberta '$ssid'?" else "Enviar rede '$ssid'?"
 
         AlertDialog.Builder(this)
             .setTitle("Enviar para Watch")
@@ -188,28 +165,20 @@ class WiFiAdd : AppCompatActivity() {
         if (isBound) unbindService(connection)
     }
 
-    // ========================================================================
-    // SCANNER ROOT (ANDROID 14/15/16 SUPPORT)
-    // ========================================================================
     object RootWifiScanner {
-
         private val CONF_PATHS = listOf(
-            "/data/misc/apexdata/com.android.wifi/WifiConfigStore.xml", // Android 11+
-            "/data/misc/wifi/WifiConfigStore.xml", // Android 8-10
-            "/data/misc/wifi/wpa_supplicant.conf" // Legacy
+            "/data/misc/apexdata/com.android.wifi/WifiConfigStore.xml",
+            "/data/misc/wifi/WifiConfigStore.xml",
+            "/data/misc/wifi/wpa_supplicant.conf"
         )
 
         fun scanAllWifiConfigs(): List<RootWifiConfig> {
             val networks = mutableListOf<RootWifiConfig>()
-
             for (path in CONF_PATHS) {
                 val content = readFile(path)
                 if (content.isNotEmpty()) {
-                    if (path.endsWith(".xml")) {
-                        networks.addAll(parseWifiConfigStoreXml(content))
-                    } else {
-                        networks.addAll(parseWpaSupplicant(content))
-                    }
+                    if (path.endsWith(".xml")) networks.addAll(parseWifiConfigStoreXml(content))
+                    else networks.addAll(parseWpaSupplicant(content))
                     if (networks.isNotEmpty()) break
                 }
             }
@@ -222,9 +191,7 @@ class WiFiAdd : AppCompatActivity() {
                 val sb = StringBuilder()
                 val reader = BufferedReader(InputStreamReader(p.inputStream))
                 var line: String?
-                while (reader.readLine().also { line = it } != null) {
-                    sb.append(line).append("\n")
-                }
+                while (reader.readLine().also { line = it } != null) sb.append(line).append("\n")
                 sb.toString()
             } catch (e: Exception) { "" }
         }
@@ -234,28 +201,17 @@ class WiFiAdd : AppCompatActivity() {
             try {
                 val blockRegex = Regex("<WifiConfiguration>.*?</WifiConfiguration>", RegexOption.DOT_MATCHES_ALL)
                 val blocks = blockRegex.findAll(xml)
-
                 for (match in blocks) {
                     val block = match.value
-
                     val ssidMatch = Regex("<string name=\"SSID\">&quot;(.*?)&quot;</string>").find(block)
                         ?: Regex("<string name=\"SSID\">(.*?)</string>").find(block)
-
                     if (ssidMatch != null) {
-                        var ssid = ssidMatch.groupValues[1].replace("&quot;", "")
-
+                        val ssid = ssidMatch.groupValues[1].replace("&quot;", "")
                         val pskMatch = Regex("<string name=\"PreSharedKey\">&quot;(.*?)&quot;</string>").find(block)
                             ?: Regex("<string name=\"PreSharedKey\">(.*?)</string>").find(block)
-
-                        var psk = pskMatch?.groupValues?.get(1)?.replace("&quot;", "") ?: ""
-
-                        // Detecção simples de segurança baseada na presença de senha
-                        // (O XML real tem campos complexos de KeyMgmt, mas isso cobre 99% dos casos domésticos)
+                        val psk = pskMatch?.groupValues?.get(1)?.replace("&quot;", "") ?: ""
                         val security = if (psk.isEmpty()) "OPEN" else "WPA"
-
-                        if (ssid.isNotEmpty()) {
-                            list.add(RootWifiConfig(ssid, psk, security))
-                        }
+                        if (ssid.isNotEmpty()) list.add(RootWifiConfig(ssid, psk, security))
                     }
                 }
             } catch (e: Exception) { e.printStackTrace() }
@@ -268,7 +224,6 @@ class WiFiAdd : AppCompatActivity() {
             for (net in networks) {
                 val ssidLine = net.lines().find { it.trim().startsWith("ssid=") }
                 val pskLine = net.lines().find { it.trim().startsWith("psk=") }
-
                 if (ssidLine != null) {
                     val ssid = ssidLine.substringAfter("=").trim().replace("\"", "")
                     val psk = pskLine?.substringAfter("=")?.trim()?.replace("\"", "") ?: ""

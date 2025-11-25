@@ -5,6 +5,8 @@
     android:orientation="vertical"
     android:padding="24dp">
 
+    <!-- Removido Spinner de Criptografia conforme solicitado -->
+
     <com.google.android.material.textfield.TextInputLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -17,22 +19,7 @@
             android:inputType="text" />
     </com.google.android.material.textfield.TextInputLayout>
 
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="Tipo de Segurança"
-        android:layout_marginTop="16dp"
-        android:textColor="?android:attr/textColorSecondary"
-        android:textSize="12sp"/>
-
-    <Spinner
-        android:id="@+id/spinnerSecurity"
-        android:layout_width="match_parent"
-        android:layout_height="48dp"
-        android:layout_marginTop="4dp"/>
-
     <com.google.android.material.textfield.TextInputLayout
-        android:id="@+id/layoutPassword"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="16dp"
