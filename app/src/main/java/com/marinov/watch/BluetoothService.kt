@@ -107,11 +107,13 @@ class BluetoothService : Service() {
 
     private val notificationMap = ConcurrentHashMap<String, Int>()
 
+    // REFATORAÇÃO: Controle mais robusto de notificações
     @Volatile
     private var currentNotificationStatus: String = ""
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    // Cache do NotificationManager para evitar múltiplas chamadas getSystemService
     private val notificationManager: NotificationManager by lazy {
         getSystemService(NOTIFICATION_SERVICE) as NotificationManager
     }
@@ -152,9 +154,6 @@ class BluetoothService : Service() {
     private val TYPE_STATUS_UPDATE = 11
     private val TYPE_SET_DND = 12
 
-    // NOVO TIPO PARA WI-FI
-    private val TYPE_WIFI_SYNC = 13
-
     private val CMD_REQUEST_APPS = "CMD_REQUEST_APPS"
     private val CMD_RESPONSE_APPS = "CMD_RESPONSE_APPS:"
     private val CMD_PING = "PING"
@@ -165,15 +164,10 @@ class BluetoothService : Service() {
         const val ACTION_WATCH_DISMISSED_LOCAL = "com.marinov.watch.DISMISSED_LOCAL"
         const val ACTION_CMD_DISMISS_ON_PHONE = "com.marinov.watch.CMD_DISMISS_PHONE"
 
-        // Constantes para Wi-Fi
-        const val ACTION_CONNECT_WIFI = "com.marinov.watch.ACTION_CONNECT_WIFI"
-        const val EXTRA_WIFI_DATA = "extra_wifi_data"
-        const val WIFI_NOTIF_ID = 500
-        const val WIFI_CHANNEL_ID = "wifi_sync_channel"
-
         const val EXTRA_NOTIF_JSON = "extra_notif_json"
         const val EXTRA_NOTIF_KEY = "extra_notif_key"
 
+        // IDs DISTINTOS para garantir limpeza correta ao trocar de estado
         const val NOTIFICATION_ID_WAITING = 10
         const val NOTIFICATION_ID_CONNECTED = 11
         const val NOTIFICATION_ID_DISCONNECTED = 12
@@ -191,7 +185,7 @@ class BluetoothService : Service() {
         const val ACTION_STOP_SERVICE = "ACTION_STOP_SERVICE"
 
         private const val TAG = "BluetoothService"
-        private const val DEBUG_NOTIFICATIONS = false
+        private const val DEBUG_NOTIFICATIONS = false // Ative para debug
     }
 
     private val internalReceiver = object : BroadcastReceiver() {
@@ -251,6 +245,8 @@ class BluetoothService : Service() {
             registerReceiver(internalReceiver, filterInternal)
             registerReceiver(watchDismissReceiver, filterWatch)
         }
+
+        if (DEBUG_NOTIFICATIONS) Log.d(TAG, "onCreate: Service created")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -258,10 +254,17 @@ class BluetoothService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+
+        // CRÍTICO: Chamar startForeground imediatamente para cumprir a promessa feita no BootReceiver.
         updateForegroundNotification()
+
+        // Inicializa lógica se não estiver conectado
         if (!isConnected) {
             initializeLogicFromPrefs()
         }
+
+        if (DEBUG_NOTIFICATIONS) Log.d(TAG, "onStartCommand: Service started, isConnected=$isConnected")
+
         return START_STICKY
     }
 
@@ -390,13 +393,16 @@ class BluetoothService : Service() {
         globalOutputStream = DataOutputStream(socket.outputStream)
         val inputStream = DataInputStream(socket.inputStream)
 
+        // Define estado de conexão ANTES de atualizar status
         isConnected = true
         isTransferring = false
         lastMessageTime = System.currentTimeMillis()
         currentDeviceName = deviceName
 
+        // Atualiza status E notificação simultaneamente
         updateStatus("Conectado a $deviceName")
 
+        // Notifica callback
         withContext(Dispatchers.Main) {
             callback?.onDeviceConnected(deviceName)
         }
@@ -432,20 +438,21 @@ class BluetoothService : Service() {
                     TYPE_SHUTDOWN_COMMAND -> handleShutdownCommand()
                     TYPE_STATUS_UPDATE -> handleStatusUpdateReceived(readString(inputStream))
                     TYPE_SET_DND -> handleSetDndCommand(readString(inputStream))
-                    // NOVO CASE PARA WI-FI
-                    TYPE_WIFI_SYNC -> handleWifiSyncReceived(readString(inputStream))
                 }
             }
         } catch (_: IOException) {
             // Conexão perdida
         } finally {
             val wasConnected = isConnected
+
             forceDisconnect()
             isConnected = false
             currentDeviceName = null
+
             if (wasConnected) {
                 updateStatus("Desconectado")
             }
+
             withContext(Dispatchers.Main) {
                 callback?.onDeviceDisconnected()
             }
@@ -478,6 +485,7 @@ class BluetoothService : Service() {
         try {
             bluetoothSocket?.close()
         } catch (_: Exception) {}
+
         statusUpdateJob?.cancel()
     }
 
@@ -520,6 +528,7 @@ class BluetoothService : Service() {
     @SuppressLint("MissingPermission")
     private fun collectWatchStatus(): JSONObject {
         val json = JSONObject()
+
         val bm = getSystemService(BATTERY_SERVICE) as BatteryManager
         val batteryLevel = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
         val isCharging = bm.isCharging
@@ -531,12 +540,17 @@ class BluetoothService : Service() {
         try {
             if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
                 val wm = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
+
                 if (wm.isWifiEnabled) {
                     val info = wm.connectionInfo
+
                     if (info != null && info.supplicantState == SupplicantState.COMPLETED) {
                         val rawSsid = info.ssid
+
                         if (rawSsid == "<unknown ssid>" || rawSsid.isEmpty()) {
-                            wifiSsid = lastValidWifiSsid.ifEmpty { "Conectado" }
+                            wifiSsid = lastValidWifiSsid.ifEmpty {
+                                "Conectado"
+                            }
                         } else {
                             val cleanSsid = rawSsid.replace("\"", "")
                             if (cleanSsid != "<unknown ssid>") {
@@ -562,10 +576,12 @@ class BluetoothService : Service() {
         } catch (_: Exception) {
             wifiSsid = "Erro Wifi"
         }
+
         json.put("battery", batteryLevel)
         json.put("charging", isCharging)
         json.put("dnd", dndEnabled)
         json.put("wifi", wifiSsid)
+
         return json
     }
 
@@ -605,10 +621,6 @@ class BluetoothService : Service() {
             }
         }
     }
-
-    // ========================================================================
-    // TRANSFERÊNCIA DE ARQUIVOS
-    // ========================================================================
 
     private fun handleFileStart(expectedSize: Long) {
         try {
@@ -658,10 +670,6 @@ class BluetoothService : Service() {
         } catch (_: Exception) {
         }
     }
-
-    // ========================================================================
-    // SHUTDOWN E COMANDOS
-    // ========================================================================
 
     private fun handleShutdownCommand() {
         Log.i(TAG, "Comando de shutdown recebido")
@@ -733,10 +741,6 @@ class BluetoothService : Service() {
             }
         }
     }
-
-    // ========================================================================
-    // NOTIFICAÇÕES E APPS
-    // ========================================================================
 
     private fun showInstallNotification(tempFile: File) {
         val authority = "${packageName}.fileprovider"
@@ -914,55 +918,16 @@ class BluetoothService : Service() {
         }
     }
 
-    // ========================================================================
-    // FEATURE: WIFI SYNC
-    // ========================================================================
-
-    fun sendWifiData(ssid: String, password: String, securityType: String) {
-        val json = JSONObject()
-        json.put("ssid", ssid)
-        json.put("password", password)
-        json.put("security", securityType)
-        sendPacket(TYPE_WIFI_SYNC, json.toString().toByteArray(Charsets.UTF_8))
-    }
-
-    private fun handleWifiSyncReceived(jsonString: String) {
-        try {
-            val json = JSONObject(jsonString)
-            val ssid = json.getString("ssid")
-
-            val intent = Intent(this, WifiConnectReceiver::class.java).apply {
-                action = ACTION_CONNECT_WIFI
-                putExtra(EXTRA_WIFI_DATA, jsonString)
-            }
-
-            val pendingIntent = PendingIntent.getBroadcast(
-                this,
-                ssid.hashCode(),
-                intent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-
-            val notification = NotificationCompat.Builder(this, WIFI_CHANNEL_ID)
-                .setContentTitle("Nova rede Wi-Fi recebida")
-                .setContentText("Toque para conectar a: $ssid")
-                .setSmallIcon(android.R.drawable.ic_dialog_map)
-                .setPriority(NotificationCompat.PRIORITY_HIGH)
-                .setAutoCancel(true)
-                .setContentIntent(pendingIntent)
-                .build()
-
-            notificationManager.notify(WIFI_NOTIF_ID, notification)
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Erro ao processar Wi-Fi recebido: ${e.message}")
-        }
-    }
-
-    // ========================================================================
-    // NOTIFICAÇÃO DE SERVIÇO
-    // ========================================================================
-
+    /**
+     * CORREÇÃO DEFINITIVA PARA CANAIS BLOQUEADOS:
+     * Ao invés de usar um único ID, usamos um ID diferente para cada estado (Waiting, Connected, etc).
+     * * Lógica:
+     * 1. Determinamos o Estado Atual -> Novo ID e Novo Canal.
+     * 2. Chamamos startForeground com o NOVO ID. Isso "segura" o serviço e previne crashes.
+     * 3. Se o usuário bloqueou esse canal, o Android não mostra nada (correto).
+     * 4. CRUCIAL: Chamamos .cancel() nos IDs dos estados antigos. Isso garante que a notificação "Waiting"
+     * suma visualmente se mudamos para "Connected", mesmo que "Connected" esteja oculto.
+     */
     private fun updateForegroundNotification() {
         try {
             val (targetId, targetChannel, targetText) = determineNotificationState()
@@ -979,6 +944,7 @@ class BluetoothService : Service() {
                 .setOnlyAlertOnce(true)
                 .build()
 
+            // Inicia/Atualiza o Foreground no ID correto do estado atual
             if (Build.VERSION.SDK_INT >= 34) {
                 val hasLocation = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
                 val type = if (hasLocation) ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
@@ -994,6 +960,8 @@ class BluetoothService : Service() {
                 startForeground(targetId, notification)
             }
 
+            // LIMPEZA: Remove visualmente as notificações dos outros estados.
+            // Isso corrige o bug onde "Aguardando" persistia se "Conectado" estivesse bloqueado.
             if (targetId != NOTIFICATION_ID_WAITING) notificationManager.cancel(NOTIFICATION_ID_WAITING)
             if (targetId != NOTIFICATION_ID_CONNECTED) notificationManager.cancel(NOTIFICATION_ID_CONNECTED)
             if (targetId != NOTIFICATION_ID_DISCONNECTED) notificationManager.cancel(NOTIFICATION_ID_DISCONNECTED)
@@ -1003,6 +971,7 @@ class BluetoothService : Service() {
         }
     }
 
+    // Retorna Triple(ID, Channel, Text)
     private fun determineNotificationState(): Triple<Int, String, String> {
         return when {
             isConnected && currentDeviceName != null ->
@@ -1049,11 +1018,6 @@ class BluetoothService : Service() {
 
         notificationManager.createNotificationChannel(NotificationChannel(INSTALL_CHANNEL_ID, "APKs", NotificationManager.IMPORTANCE_HIGH))
         notificationManager.createNotificationChannel(NotificationChannel(MIRRORED_CHANNEL_ID, "Notificações do celular", NotificationManager.IMPORTANCE_HIGH))
-
-        // Novo canal Wi-Fi
-        notificationManager.createNotificationChannel(
-            NotificationChannel(WIFI_CHANNEL_ID, "Sincronização Wi-Fi", NotificationManager.IMPORTANCE_HIGH)
-        )
     }
 
     private fun savePreference(key: String, value: String) {

@@ -30,10 +30,6 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.appbar.AppBarLayout
 import com.google.android.material.card.MaterialCardView
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
 
@@ -128,8 +124,11 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
 
     override fun onResume() {
         super.onResume()
+        // Quando a atividade volta ao foco, é crucial se registrar novamente como o callback
+        // e atualizar a UI com o estado mais recente do serviço.
         if (isBound) {
             bluetoothService?.callback = this
+            // Força a atualização da UI com os dados atuais do serviço
             updateStatusUI(bluetoothService?.currentStatus ?: "Verificando...", bluetoothService?.isConnected == true)
         }
     }
@@ -148,6 +147,7 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
         progressBarMain = findViewById(R.id.progressBarMain)
         recyclerViewMenu = findViewById(R.id.recyclerViewMenu)
 
+        // Views Status Watch
         cardWatchStatus = findViewById(R.id.cardWatchStatus)
         tvBatteryPercent = findViewById(R.id.tvBatteryPercent)
         imgBatteryIcon = findViewById(R.id.imgBatteryIcon)
@@ -177,6 +177,7 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
 
     private fun setupDndClickListener() {
         layoutDndAction.setOnClickListener {
+            // Também aplicamos a verificação segura aqui
             runIfConnected {
                 val newState = !currentDndState
                 bluetoothService?.sendDndCommand(newState)
@@ -185,33 +186,13 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
         }
     }
 
+    // --- NOVA FUNÇÃO DE SEGURANÇA ---
+    // Verifica se está conectado antes de executar a ação.
     private fun runIfConnected(action: () -> Unit) {
         if (bluetoothService?.isConnected == true) {
             action()
         } else {
             Toast.makeText(this, "Watch não conectado.", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    // Helper para verificar root antes de abrir o WiFi Sync
-    private fun checkRootAndOpenWifi() {
-        CoroutineScope(Dispatchers.IO).launch {
-            val hasRoot = try {
-                val process = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
-                process.waitFor() == 0
-            } catch (_: Exception) { false }
-
-            withContext(Dispatchers.Main) {
-                if (hasRoot) {
-                    startActivity(Intent(this@MainActivity, WiFiAdd::class.java))
-                } else {
-                    AlertDialog.Builder(this@MainActivity)
-                        .setTitle("Root Necessário")
-                        .setMessage("Para sincronizar redes Wi-Fi, o smartphone precisa de acesso root.")
-                        .setPositiveButton("OK", null)
-                        .show()
-                }
-            }
         }
     }
 
@@ -221,39 +202,38 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
 
         val options = listOf(
             MenuOption(
-                "Sincronizar Wi-Fi",
-                "Enviar redes salvas para o Watch",
-                android.R.drawable.ic_menu_share, // Ícone genérico, pode substituir por ic_wifi
-                { runIfConnected { checkRootAndOpenWifi() } }
-            ),
-            MenuOption(
                 "Gerenciar Aplicativos",
                 "Ver lista de apps instalados no Watch",
                 android.R.drawable.ic_menu_sort_by_size,
+                // BLOQUEADO: Precisa de conexão para buscar lista
                 { runIfConnected { startActivity(Intent(this, AppListActivity::class.java)) } }
             ),
             MenuOption(
                 "Notificações",
                 "Escolher quais apps enviam alertas",
                 android.R.drawable.ic_popup_reminder,
+                // BLOQUEADO: Geralmente só útil se o watch estiver ativo
                 { runIfConnected { startActivity(Intent(this, NotificationSettingsActivity::class.java)) } }
             ),
             MenuOption(
                 "Instalar APK",
                 "Enviar arquivo .apk para o Watch",
                 android.R.drawable.ic_input_add,
+                // BLOQUEADO: Impossível enviar sem conexão
                 { runIfConnected { pickApkLauncher.launch("application/vnd.android.package-archive") } }
             ),
             MenuOption(
                 "Desligar Smartwatch",
                 "Desligar completamente o smartwatch",
                 android.R.drawable.ic_lock_power_off,
+                // BLOQUEADO: Comando remoto
                 { runIfConnected { confirmShutdownWatch() } }
             ),
             MenuOption(
                 "Desconectar",
                 "Parar serviço Bluetooth",
                 android.R.drawable.ic_menu_close_clear_cancel,
+                // PERMITIDO: O usuário precisa poder parar a busca/serviço mesmo se não conectou
                 {
                     bluetoothService?.stopConnectionLoopOnly()
                     updateStatusUI("Parado", false)
@@ -263,6 +243,7 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
                 "Resetar Tudo",
                 "Apagar configurações e voltar ao início",
                 android.R.drawable.ic_menu_delete,
+                // PERMITIDO: Ação local de emergência
                 { resetApp() }
             )
         )
@@ -342,6 +323,8 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
     }
 
     private fun confirmShutdownWatch() {
+        // A verificação de segurança já foi feita no menu (runIfConnected),
+        // mas mantemos uma verificação extra por segurança.
         if (bluetoothService?.isConnected != true) {
             Toast.makeText(this, "Watch não conectado", Toast.LENGTH_SHORT).show()
             return
@@ -412,6 +395,7 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
         runOnUiThread {
             updateStatusUI("Desconectado", false)
             if (uploadDialog?.isShowing == true) {
+                // Se o progresso já for 100%, não trate a desconexão como falha.
                 if (uploadProgressBar?.progress != 100) {
                     updateUploadProgress(-1)
                 }
