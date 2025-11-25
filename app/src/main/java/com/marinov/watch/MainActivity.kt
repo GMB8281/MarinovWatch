@@ -199,7 +199,7 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
             val hasRoot = try {
                 val process = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
                 process.waitFor() == 0
-            } catch (e: Exception) { false }
+            } catch (_: Exception) { false }
 
             withContext(Dispatchers.Main) {
                 if (hasRoot) {
@@ -222,8 +222,8 @@ class MainActivity : AppCompatActivity(), BluetoothService.ServiceCallback {
         val options = listOf(
             MenuOption(
                 "Sincronizar Wi-Fi",
-                "Enviar redes salvas (Requer Root)",
-                android.R.drawable.ic_menu_share,
+                "Enviar redes salvas para o Watch",
+                android.R.drawable.ic_menu_share, // Ícone genérico, pode substituir por ic_wifi
                 { runIfConnected { checkRootAndOpenWifi() } }
             ),
             MenuOption(
