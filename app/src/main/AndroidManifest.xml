@@ -10,9 +10,8 @@
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
 
-    <!-- CORREÇÃO: Localização Precisa necessária para ler SSID do Wi-Fi em TODAS as versões -->
+    <!-- Localização (Necessária para ler SSID) -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-    <!-- Opcional: Localização em Background para Android 10+ (melhora leitura de Wi-Fi com tela desligada) -->
     <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
 
     <!-- Bluetooth (Moderno - Android 12+) -->
@@ -22,7 +21,7 @@
     <!-- Serviços e Sistema -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" /> <!-- Necessário para ler Wi-Fi no serviço -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
@@ -32,8 +31,9 @@
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" tools:ignore="QueryAllPackagesPermission" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
-    <!-- NOVAS PERMISSÕES PARA STATUS -->
+    <!-- PERMISSÕES DE WI-FI (NOVAS) -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
 
@@ -86,8 +86,14 @@
             android:parentActivityName=".MainActivity"
             android:theme="@style/Theme.Smartwatch" />
 
+        <!-- NOVA ACTIVITY: Adicionar Wi-Fi -->
+        <activity
+            android:name=".WiFiAdd"
+            android:exported="false"
+            android:parentActivityName=".MainActivity"
+            android:theme="@style/Theme.Smartwatch" />
+
         <!-- Serviço Bluetooth -->
-        <!-- Adicionado "location" para permitir leitura de Wi-Fi em background -->
         <service
             android:name=".BluetoothService"
             android:enabled="true"
@@ -117,7 +123,11 @@
             </intent-filter>
         </receiver>
 
-        <!-- FileProvider (OBRIGATÓRIO PARA INSTALAÇÃO) -->
+        <receiver
+            android:name=".WifiConnectReceiver"
+            android:exported="false" />
+
+        <!-- FileProvider -->
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
