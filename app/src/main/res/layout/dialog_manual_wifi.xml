@@ -17,28 +17,11 @@
             android:inputType="text" />
     </com.google.android.material.textfield.TextInputLayout>
 
-    <!-- Novo Spinner para Seleção de Segurança -->
-    <TextView
-        android:layout_width="wrap_content"
+    <com.google.android.material.textfield.TextInputLayout
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="16dp"
-        android:text="Tipo de Segurança"
-        android:textSize="12sp"
-        android:textColor="?android:attr/textColorSecondary"/>
-
-    <Spinner
-        android:id="@+id/spinnerSecurity"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginBottom="8dp"
-        android:minHeight="48dp" />
-
-    <com.google.android.material.textfield.TextInputLayout
-        android:id="@+id/inputLayoutPassword"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:hint="Senha">
+        android:hint="Senha.">
 
         <com.google.android.material.textfield.TextInputEditText
             android:id="@+id/etPassword"

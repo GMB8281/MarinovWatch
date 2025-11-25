@@ -9,10 +9,7 @@ import android.os.IBinder
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.widget.AdapterView
-import android.widget.ArrayAdapter
 import android.widget.EditText
-import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
@@ -21,10 +18,8 @@ import androidx.appcompat.widget.Toolbar
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.floatingactionbutton.FloatingActionButton
-import com.google.android.material.textfield.TextInputLayout
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.BufferedReader
@@ -81,9 +76,7 @@ class WiFiAdd : AppCompatActivity() {
 
     private fun checkRootAndScan() {
         CoroutineScope(Dispatchers.IO).launch {
-            // Tenta verificar root com um pouco mais de persistência
             val hasRoot = checkRoot()
-
             withContext(Dispatchers.Main) {
                 if (!hasRoot) {
                     Toast.makeText(this@WiFiAdd, "Root não detectado. Use o botão (+) para adicionar manualmente.", Toast.LENGTH_LONG).show()
@@ -99,27 +92,10 @@ class WiFiAdd : AppCompatActivity() {
     }
 
     private fun checkRoot(): Boolean {
-        // Método mais robusto: verifica se consegue executar 'ls /data/data' que requer privilégios
-        // ou checa explicitamente o exitValue do comando id
         return try {
-            val p = Runtime.getRuntime().exec(arrayOf("su", "-c", "ls /data/data"))
-            // Espera um pouco para garantir que o processo termine, evitando race condition
-            // que causa o falso negativo enquanto o usuário aceita o prompt
-            val exitCode = p.waitFor()
-            exitCode == 0
-        } catch (e: Exception) {
-            // Tentativa secundária leve
-            try {
-                val p2 = Runtime.getRuntime().exec("su")
-                val os = p2.outputStream
-                os.write("exit\n".toByteArray())
-                os.flush()
-                os.close()
-                p2.waitFor() == 0
-            } catch (e2: Exception) {
-                false
-            }
-        }
+            val process = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
+            process.waitFor() == 0
+        } catch (_: Exception) { false }
     }
 
     private fun loadWifiNetworksRoot() {
@@ -135,7 +111,6 @@ class WiFiAdd : AppCompatActivity() {
                 } else {
                     findViewById<TextView>(R.id.tvEmptyState).visibility = View.GONE
                     recyclerView.adapter = WifiAdapter(rootNetworks) { config ->
-                        // Mantém a lógica original para redes salvas (sem perguntar criptografia)
                         confirmSendWifi(config.ssid, config.psk, config.security)
                     }
                     Toast.makeText(this@WiFiAdd, "${rootNetworks.size} redes encontradas!", Toast.LENGTH_SHORT).show()
@@ -144,31 +119,11 @@ class WiFiAdd : AppCompatActivity() {
         }
     }
 
-    // DIÁLOGO ATUALIZADO: Com seleção de Criptografia
+    // DIÁLOGO SIMPLIFICADO: Sem Spinner de Criptografia
     private fun showManualAddDialog() {
         val view = LayoutInflater.from(this).inflate(R.layout.dialog_manual_wifi, null)
         val etSsid = view.findViewById<EditText>(R.id.etSsid)
         val etPassword = view.findViewById<EditText>(R.id.etPassword)
-        val spinnerSecurity = view.findViewById<Spinner>(R.id.spinnerSecurity)
-        val inputLayoutPassword = view.findViewById<TextInputLayout>(R.id.inputLayoutPassword)
-
-        // Configura o Spinner
-        val securityTypes = arrayOf("WPA/WPA2", "WEP", "Sem Senha (Open)")
-        val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, securityTypes)
-        spinnerSecurity.adapter = adapter
-
-        // Listener para esconder campo de senha se for Open
-        spinnerSecurity.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                if (position == 2) { // Sem Senha
-                    inputLayoutPassword.visibility = View.GONE
-                    etPassword.setText("")
-                } else {
-                    inputLayoutPassword.visibility = View.VISIBLE
-                }
-            }
-            override fun onNothingSelected(parent: AdapterView<*>?) {}
-        }
 
         AlertDialog.Builder(this)
             .setTitle("Adicionar Wi-Fi Manualmente")
@@ -176,16 +131,10 @@ class WiFiAdd : AppCompatActivity() {
             .setPositiveButton("Enviar") { _, _ ->
                 val ssid = etSsid.text.toString()
                 val pass = etPassword.text.toString()
-                val securityIndex = spinnerSecurity.selectedItemPosition
-
-                // Mapeia a seleção para as Strings que o Watch espera
-                val security = when (securityIndex) {
-                    0 -> "WPA"
-                    1 -> "WEP"
-                    else -> "OPEN"
-                }
 
                 if (ssid.isNotEmpty()) {
+                    // Lógica automática: Senha vazia = OPEN, Senha preenchida = WPA
+                    val security = if (pass.isEmpty()) "OPEN" else "WPA"
                     confirmSendWifi(ssid, pass, security)
                 }
             }
@@ -194,11 +143,10 @@ class WiFiAdd : AppCompatActivity() {
     }
 
     private fun confirmSendWifi(ssid: String, pass: String, security: String) {
-        // Texto simples conforme solicitado, sem detalhes técnicos extras na mensagem
-        val msg = "Enviar rede '$ssid' para o Watch?"
+        val msg = if (security == "OPEN") "Enviar rede aberta '$ssid'?" else "Enviar rede '$ssid'?"
 
         AlertDialog.Builder(this)
-            .setTitle("Enviar Wi-Fi")
+            .setTitle("Enviar para Watch")
             .setMessage(msg)
             .setPositiveButton("Sim") { _, _ ->
                 if (bluetoothService?.isConnected == true) {
